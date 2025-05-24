@@ -181,7 +181,7 @@ class g3detect:
                       log_format=self.config.log_format,
                       log_format_date=self.config.log_format_date)
         self.logger.info(f"Logging Started at level:{self.config.loglevel}")
-        self.logger.info(f"Running spt3g_ingest version: {mmblink.__version__}")
+        self.logger.info(f"Running mmblink version: {mmblink.__version__}")
 
     def check_input_files(self):
         """
