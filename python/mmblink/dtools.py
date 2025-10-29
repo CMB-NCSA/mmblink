@@ -652,7 +652,7 @@ class g3detect:
         # Loop over all of the observations
         for k, obsID in enumerate(self.bands):
             self.logger.debug(f"Dual Band {k+1}/{len(self.bands)}")
-            if self.bands[obsID] == self.config.detect_bands:
+            if set(self.bands[obsID]) == set(self.config.detect_bands):
                 band1 = self.bands[obsID][0]
                 band2 = self.bands[obsID][1]
                 cat1 = self.cat[band1][obsID]
