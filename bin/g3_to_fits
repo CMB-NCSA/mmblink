@@ -17,6 +17,8 @@ def cmdline():
     parser = argparse.ArgumentParser(description="Transform g3 FlatSkyMap files to FITS")
     parser.add_argument("files", nargs='+',
                         help="Filenames to transform from g3 to FITS")
+    parser.add_argument("--output_dir",action="store", default=None,
+                        help="The output directory to save the fits files.")
     parser.add_argument("--clobber", action='store_true', default=False,
                         help="Clobber output files")
     parser.add_argument("--trim", action='store_true', default=False,
@@ -55,7 +57,9 @@ if __name__ == "__main__":
         t1 = time.time()
         logger.info(f"Doing: {k}/{nfiles} files")
         logger.info(f"Doing file: {g3file}")
-        ft.g3_to_fits(g3file, trim=args.trim,
+        ft.g3_to_fits(g3file,
+                      output_dir = args.output_dir,
+                      trim=args.trim,
                       compress=args.compress,
                       overwrite=args.clobber)
         logger.info(f"Total time for file {g3file}: {du.elapsed_time(t1)}")

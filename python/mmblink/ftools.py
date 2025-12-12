@@ -25,12 +25,14 @@ _keywords_map = {'ObservationStart': ('DATE-BEG', 'Observation start date'),
 logger = logging.getLogger(__name__)
 
 
-def g3_to_fits(g3file, trim=True, compress=False, quantize_level=16.0, overwrite=True):
+def g3_to_fits(g3file, output_dir=None, trim=True, compress=False, quantize_level=16.0, overwrite=True):
     """
     Transform a G3 file containing a FlatSkyMap into a FITS file.
 
     Parameters:
     - g3file (str): Input G3 file path.
+    - output_dir (str): The output directory for the fits files. 
+      If None, then it's the same as the input directory.
     - trim (bool): If True, trims the FITS image to a smaller region.
     - compress (bool): If True, compresses the FITS file.
     - quantize_level (float): Quantization level for the transformation.
@@ -63,9 +65,15 @@ def g3_to_fits(g3file, trim=True, compress=False, quantize_level=16.0, overwrite
             band = frame['Id']
             # We need to add band to the filename, so we have different outputs
             if band in basename:
-                fitsfile = f"{basename}.fits"
+                fname = f"{basename}.fits"
             else:
-                fitsfile = f"{basename}_{band}.fits"
+                fname = f"{basename}_{band}.fits"
+
+            if output_dir is None:
+                fitsfile = fname
+            else:
+                os.makedirs(output_dir, exist_ok=True)
+                fitsfile = os.path.join(output_dir,fname.split("/")[-1])
 
             # If fitsfile already exists and overwrite is False we do nothing
             if overwrite is False and os.path.exists(fitsfile):
