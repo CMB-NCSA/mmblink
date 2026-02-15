@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mmblink"
+version = "1.0.0" # Could be dynamic
+description = "A mm-wave transient detection pipeline for CMB surveys"
+readme = "README.md"
+requires-python = ">= 3.11"
+dependencies = [
+    "astropy>=7.2.0",
+    "fitsio>=1.3.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "pandas>=3.0.0",
+    "photutils>=2.3.0",
+    "psutil>=7.2.2",
+    "python-magic>=0.4.27",
+    "pyyaml>=6.0.3",
+    "scikit-image>=0.26.0",
+    "scipy>=1.17.0",
+    "spt3g>=1.0.1",
+]
