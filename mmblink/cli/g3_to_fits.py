@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import logging
 import mmblink.ftools as ft
 import mmblink.dtools as du
@@ -39,7 +37,7 @@ def cmdline():
     return args
 
 
-if __name__ == "__main__":
+def main():
     """
     Main function to execute the transformation of G3 files to FITS files.
     The script logs the progress and times the transformation process for each file.

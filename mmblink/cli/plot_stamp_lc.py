@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import mmblink.ftools as ft
 import argparse
 
@@ -31,8 +29,7 @@ def cmdline():
     return args
 
 
-if __name__ == "__main__":
-
+def main():
     # Get the command-line option
     args = cmdline()
 

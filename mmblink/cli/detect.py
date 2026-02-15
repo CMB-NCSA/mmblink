@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import mmblink.dtools as du
 import argparse
 import time
@@ -78,7 +77,7 @@ def cmdline():
     return args
 
 
-if __name__ == "__main__":
+def main():
     """
     Main execution script for running transient detection on SPT-3G data.
     - Parses command-line arguments.
