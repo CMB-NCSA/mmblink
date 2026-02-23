@@ -28,7 +28,7 @@ import fitsio
 from astropy.wcs import WCS
 from astropy.io import ascii
 from photutils.utils.exceptions import NoDetectionsWarning
-import mmblink.cutterlib as cutterlib
+import mmblink.legacy.cutterlib as cutterlib
 import copy
 
 import warnings

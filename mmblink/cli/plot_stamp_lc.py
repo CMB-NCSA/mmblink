@@ -1,4 +1,4 @@
-import mmblink.ftools as ft
+import mmblink.legacy.ftools as ft
 import argparse
 
 

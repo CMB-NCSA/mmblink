@@ -1,6 +1,6 @@
 import logging
-import mmblink.ftools as ft
-import mmblink.dtools as du
+import mmblink.legacy.ftools as ft
+import mmblink.legacy.dtools as du
 import time
 import argparse
 

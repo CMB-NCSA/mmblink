@@ -10,7 +10,7 @@ rev: a80830503cd5fda0148a9cc5b0621b6372df8f72.
 import fitsio
 import os
 import sys
-import mmblink.astrometry as astrometry
+import mmblink.legacy.astrometry as astrometry
 import time
 import numpy
 import copy
