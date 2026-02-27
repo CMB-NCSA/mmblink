@@ -21,6 +21,8 @@ def cmdline():
 
     parser.add_argument("--field", type=str, action='store', default=None,
                         help="Field name (i.e. SourceName) for automatically determining point source file to use.")
+    parser.add_argument("--no_remove_source", action='store_true', default=False,
+                        help="Do not perform removing objects near sources.")
     parser.add_argument("--detect_bands",  nargs='+', action='store', default=['90GHz', '150GHz'],
                         help="List of bands where will run source detection \
                               [i.e.: 90GHz, 150GHz, 200GHz], (default=90GHz 150GHz")

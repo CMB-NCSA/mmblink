@@ -436,7 +436,8 @@ class g3detect:
 
         if cat is not None:
             # Remove objects that match the sources catalog for that field
-            cat = remove_objects_near_sources(cat, field, self.config.point_source_file)
+            if self.config.no_remove_source == False:
+                cat = remove_objects_near_sources(cat, field, self.config.point_source_file)
 
             # Cut in ellipticity -- first replace nan for a large number (i.e. 99)
             e = cat['ellipticity']
