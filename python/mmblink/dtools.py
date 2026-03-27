@@ -30,6 +30,7 @@ from astropy.io import ascii
 from photutils.utils.exceptions import NoDetectionsWarning
 import mmblink.cutterlib as cutterlib
 import copy
+from pathlib import Path
 
 import warnings
 # to ignore astropy NoDetectionsWarning
@@ -2029,16 +2030,17 @@ def g3_or_fits(filename):
         >>> g3_or_fits('data/file.fits')
         'FITS'
     """
-    ext = ".".join(filename.split(".")[1:])
-    if ext == "fits" or ext == "fits.gz" or ext == "fits.fz":
-        filetype = "FITS"
-    elif ext == "g3" or ext == "g3.gz":
-        filetype = "G3"
+    path = Path(filename)
+    ext = "".join(path.suffixes).lower()
+
+    if ext in [".fits", ".fits.gz", ".fits.fz"]:
+        return "FITS"
+    elif ext in [".g3", ".g3.gz"]:
+        return "G3"
     else:
         msg = f"Could not find filetype for file {filename}"
         LOGGER.warning(msg)
         raise ValueError(msg)
-    return filetype
 
 
 def plot_rms2D(bkg, ax, gmask=None, nsigma_plot=3.5):
