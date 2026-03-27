@@ -71,6 +71,13 @@ def cmdline():
     parser.add_argument("--ntheads", action="store", default=1, type=int,
                         help="The number of threads used by numexpr 0=automatic, 1=single [default]")
 
+    parser.add_argument("--modular", action="store_true", default=False,
+        help=(
+            "Use modular processing for detection. "
+            "Currently only performs detection per file without collection."
+        )
+    )
+
     args = parser.parse_args()
     # Sort the bands
     bands = du.sort_bands(args.detect_bands)
@@ -92,18 +99,24 @@ if __name__ == "__main__":
     args = cmdline()
     # Initialize detection worker with parsed arguments
     g3d = du.g3detect(**args.__dict__)
-    # Run the detection on all input files that match detection bands
-    g3d.run_detection_files()
 
-    # Source matching
-    if args.dual_detection:
-        # Dual matching, source should be detected in both bands per OBSID
-        g3d.collect_dual()
+    if args.modular:
+        # Run detections using modular processing for each file. Currently,
+        # no further processing can be performed after the per file detection.
+        g3d.run_detection_modular()
     else:
-        # Extract the unique detections per band we used
-        g3d.collect_single()
+        # Run the detection on all input files that match detection bands
+        g3d.run_detection_files()
 
-    g3d.make_stamps_and_lighcurves()
+        # Source matching
+        if args.dual_detection:
+            # Dual matching, source should be detected in both bands per OBSID
+            g3d.collect_dual()
+        else:
+            # Extract the unique detections per band we used
+            g3d.collect_single()
+
+        g3d.make_stamps_and_lighcurves()
     print(f"Grand total time: {du.elapsed_time(t0)}")
     exit()
 
