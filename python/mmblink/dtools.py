@@ -2145,11 +2145,11 @@ def detect_with_photutils_no_log(data, wgt=None, mask=None, nsigma_thresh=3.5, n
 
     # Perform segmentation and deblending
     finder = SourceFinder(npixels=npixels, nlevels=32, contrast=0.001, progress_bar=False)
-    segm = finder(data, threshold)
+    segm = finder(data, threshold, mask=mask)
     # We stop if we don't find source
     if segm is None:
         return None, None
-    cat = SourceCatalog(data, segm, error=wgt, wcs=wcs, progress_bar=True)
+    cat = SourceCatalog(data, segm, error=wgt, mask=mask, wcs=wcs, progress_bar=True)
     # Make sure these are added.
     cat.default_columns.append('elongation')
     cat.default_columns.append('ellipticity')
