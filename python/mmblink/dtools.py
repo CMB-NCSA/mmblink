@@ -330,7 +330,8 @@ class g3detect:
         self.flux_wgt[key] = ifits[HDU_WGT].read()
         ifits.close()
         self.logger.debug("Done Reading")
-        self.flux_mask[key] = np.where(self.flux_wgt[key] != 0, int(1), 0)
+        # Mask is True for pixels with no data.
+        self.flux_mask[key] = self.flux_wgt[key] == 0
         self.logger.debug(f"Min/Max Flux: {self.flux[key].min()} {self.flux[key].max()}")
         self.logger.debug(f"Min/Max Wgt: {self.flux_wgt[key].min()} {self.flux_wgt[key].max()}")
         self.logger.info(f"Done loading filename: {filename} in {elapsed_time(t0)}")
@@ -391,7 +392,8 @@ class g3detect:
             g3_mask = frame["T"].to_mask()
             g3_mask_map = g3_mask.to_map()
             flux_mask = np.asarray(g3_mask_map)
-            self.flux_mask[key] = np.where(flux_mask == 1, int(1), 0)
+            # Mask is True for pixels with no data.
+            self.flux_mask[key] = flux_mask == 0
         except Exception as e:
             self.logger.warning(e.message)
             self.flux_mask[key] = None
@@ -1082,7 +1084,8 @@ def get_fits_map(filename):
         header = header_map['SCI']
         flux = fits[sci_ind].read()
         wgt = fits[wgt_ind].read()
-        mask = np.where(wgt != 0, 1, 0)
+        # Mask is True for pixels with no data.
+        mask = wgt == 0
         return header, {"flux": flux, "wgt": wgt, "mask": mask}
 
 
@@ -2118,7 +2121,7 @@ def compute_rms2D(data, mask=None, box=200, filter_size=(3, 3), sigmaclip=None):
     # Masking does not work, as images have a large section that it's empty, instead we trick it
     # by masking the input data with Nans
     if mask is not None:
-        data = np.where(mask, data, np.nan)
+        data = np.where(mask, np.nan, data)
     bkg = photutils.background.Background2D(data, box, mask=None, filter_size=filter_size,
                                             sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
     return bkg
@@ -2131,23 +2134,16 @@ def detect_with_photutils_no_log(data, wgt=None, mask=None, nsigma_thresh=3.5, n
     Logging can create conflicts when performing multiprocessing.
     """
     if mask is not None:
-        # Select only the indices with flux
-        idx = np.where(mask == 1)
-        # Create a bool mask for the maked array, False is NOT masked
-        gmask = np.where(mask == 1, False, True)
         # Make the data array a masked array (better plots)
-        data = ma.masked_array(data, gmask)
+        data = ma.masked_array(data, mask)
+        mean, sigma = norm.fit(data[~mask])
     else:
-        idx = np.where(mask)
-        gmask = None
-    # Get the mean and std of the distribution
-    mean, sigma = norm.fit(data[idx].flatten())
+        mean, sigma = norm.fit(data)
 
     # Define the threshold, array in the case of rms2D
     if rms2D:
         bkg = compute_rms2D(data, mask=mask, box=box, filter_size=filter_size, sigmaclip=sigmaclip)
-        sigma2D = np.where(mask, bkg.background, np.nan)
-        # sigma2D = bkg.background
+        sigma2D = bkg.background if mask is None else np.where(mask, np.nan, bkg.background)
         threshold = nsigma_thresh * sigma2D
         # Dump 2D rms image into a fits file
         if rms2Dimage:
@@ -2159,8 +2155,8 @@ def detect_with_photutils_no_log(data, wgt=None, mask=None, nsigma_thresh=3.5, n
             fits.close()
         if plot:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 9))
-            plot_distribution(ax1, data[idx], mean, sigma, nsigma=nsigma_thresh)
-            plot_rms2D(bkg.background, ax2, gmask=gmask)
+            plot_distribution(ax1, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
+            plot_rms2D(bkg.background, ax2, mask=mask)
             plt.savefig(f"{plot_name}_bkg.pdf")
     else:
         threshold = nsigma_thresh * sigma
@@ -2195,11 +2191,11 @@ def detect_with_photutils_no_log(data, wgt=None, mask=None, nsigma_thresh=3.5, n
         else:
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
         plot_detection(ax1, data, cat, sigma, nsigma_plot=5, plot_title=plot_title)
-        plot_segmentation(ax2, segm, cat, gmask=gmask)
-        plot_distribution(ax3, data[idx], mean, sigma, nsigma=nsigma_thresh)
+        plot_segmentation(ax2, segm, cat, mask=mask)
+        plot_distribution(ax3, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
         if rms2D:
             # Make the background image a masked arrays
-            plot_rms2D(bkg.background, ax4, gmask=gmask)
+            plot_rms2D(bkg.background, ax4, mask=mask)
         if plot_name:
             plt.savefig(f"{plot_name}.pdf")
         else:
@@ -2253,24 +2249,17 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
     """
     t0 = time.time()
     if mask is not None:
-        # Select only the indices with flux
-        idx = np.where(mask == 1)
-        # Create a bool mask for the maked array, False is NOT masked
-        LOGGER.info("Selecting indices for boolean mask")
-        gmask = np.where(mask == 1, False, True)
         # Make the data array a masked array (better plots)
-        data = ma.masked_array(data, gmask)
+        data = ma.masked_array(data, mask)
+        mean, sigma = norm.fit(data[~mask])
     else:
-        idx = np.where(mask)
-        gmask = None
-    # Get the mean and std of the distribution
-    mean, sigma = norm.fit(data[idx].flatten())
+        mean, sigma = norm.fit(data)
 
     # Define the threshold, array in the case of rms2D
     if rms2D:
         t0 = time.time()
         bkg = compute_rms2D(data, mask=mask, box=box, filter_size=filter_size, sigmaclip=sigmaclip)
-        sigma2D = np.where(mask, bkg.background, np.nan)
+        sigma2D = bkg.background if mask is None else np.where(mask, np.nan, bkg.background)
         # sigma2D = bkg.background
         threshold = nsigma_thresh * sigma2D
         LOGGER.debug(f"2D RMS computed in {elapsed_time(t0)}")
@@ -2285,8 +2274,8 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
             LOGGER.info(f"2D RMS FITS image: {fitsname}")
         if plot:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 9))
-            plot_distribution(ax1, data[idx], mean, sigma, nsigma=nsigma_thresh)
-            plot_rms2D(bkg.background, ax2, gmask=gmask)
+            plot_distribution(ax1, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
+            plot_rms2D(bkg.background, ax2, mask=mask)
             plt.savefig(f"{plot_name}_bkg.pdf")
             LOGGER.info(f"Created: {plot_name}_bkg.pdf")
     else:
@@ -2328,11 +2317,11 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
         else:
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
         plot_detection(ax1, data, cat, sigma, nsigma_plot=5, plot_title=plot_title)
-        plot_segmentation(ax2, segm, cat, gmask=gmask)
-        plot_distribution(ax3, data[idx], mean, sigma, nsigma=nsigma_thresh)
+        plot_segmentation(ax2, segm, cat, mask=mask)
+        plot_distribution(ax3, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
         if rms2D:
             # Make the background image a masked arrays
-            plot_rms2D(bkg.background, ax4, gmask=gmask)
+            plot_rms2D(bkg.background, ax4, mask=mask)
         if plot_name:
             plt.savefig(f"{plot_name}.pdf")
             LOGGER.info(f"Saved: {plot_name}.pdf")
@@ -2380,7 +2369,7 @@ def g3_or_fits(filename):
         raise ValueError(msg)
 
 
-def plot_rms2D(bkg, ax, gmask=None, nsigma_plot=3.5):
+def plot_rms2D(bkg, ax, mask=None, nsigma_plot=3.5):
     """
     Plot the 2D noise map (RMS) with optional masking.
 
@@ -2391,15 +2380,15 @@ def plot_rms2D(bkg, ax, gmask=None, nsigma_plot=3.5):
     Args:
         bkg (numpy.ndarray): The 2D background noise data (RMS) to be displayed.
         ax (matplotlib.axes.Axes): The axes on which to plot the data.
-        gmask (numpy.ndarray, optional): A boolean mask array to hide certain regions in the plot. Default is None.
+        mask (numpy.ndarray, optional): A boolean mask array to hide certain regions in the plot. Default is None.
         nsigma_plot (float, optional): The number of standard deviations for color scaling. Default is 3.5.
 
     Example:
         >>> plot_rms2D(bkg, ax)
     """
-    # Plot a masked array if gmask is passed
-    if gmask is not None:
-        bkg = ma.masked_array(bkg, gmask)
+    # Plot a masked array if mask is passed
+    if mask is not None:
+        bkg = ma.masked_array(bkg, mask)
     im = ax.imshow(bkg, origin='lower', cmap='Greys')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
@@ -2439,7 +2428,7 @@ def plot_detection(ax1, data, cat, sigma, nsigma_plot=5, plot_title=None):
     cat.plot_kron_apertures(ax=ax1, color='white', lw=0.5)
 
 
-def plot_segmentation(ax2, segm, cat, gmask=None):
+def plot_segmentation(ax2, segm, cat, mask=None):
     """
     Plot a segmentation image with overlaid catalog apertures.
 
@@ -2451,14 +2440,14 @@ def plot_segmentation(ax2, segm, cat, gmask=None):
         ax2 (matplotlib.axes.Axes): The axes on which to plot the segmentation image.
         segm (numpy.ndarray): The segmentation image (2D array).
         cat (astropy.table.Table): The catalog containing object information, used to overlay apertures.
-        gmask (numpy.ndarray, optional): A boolean mask to hide certain segments in the plot. Default is None.
+        mask (numpy.ndarray, optional): A boolean mask to hide certain segments in the plot. Default is None.
 
     Example:
         >>> plot_segmentation(ax2, segm, cat)
     """
-    # Plot a masked array if gmask is passed
-    if gmask is not None:
-        segm_plot = ma.masked_array(segm, gmask)
+    # Plot a masked array if mask is passed
+    if mask is not None:
+        segm_plot = ma.masked_array(segm, mask)
     else:
         segm_plot = segm
     im = ax2.imshow(segm_plot, origin='lower', cmap=segm.cmap,
