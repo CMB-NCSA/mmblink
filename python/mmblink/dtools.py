@@ -1148,7 +1148,12 @@ def detect_in_file(filename, config):
                 )
 
             # Filter sources with ellipticity greater than or equal to the cut.
-            cat = filter_ellipticity(cat, config.ell_cut)
+            cat = cat[
+                ~(
+                    (cat["ellipticity"] >= config.ell_cut)
+                    | np.isnan(cat["ellipticity"])
+                )
+            ]
         if cat is None or len(cat) == 0:
             # Either no sources were detected or they were all filtered.
             return None, None
@@ -1199,31 +1204,6 @@ def add_obs_column(catalog):
     catalog.add_column(band, name="band", index=0)
 
     return catalog
-
-
-def filter_ellipticity(catalog, cut):
-    """Remove objects with an ellipticity greater than or equal to a cut.
-
-    Filters a catalog to only keep rows where the ellipticity is below the
-    given cut. It also removes all rows where the ellipticity is NaN.
-
-    Parameters
-    ----------
-    catalog : astropy.table.Table
-        The catalog of objects to filter based on ellipticity. Must have a
-        column named "ellipticity".
-    cut : float
-        Only rows below this value are kept.
-
-    Returns
-    -------
-    filtered : astropy.table.Table
-        A new table with filtered rows removed.
-
-    """
-    return catalog[
-        ~((catalog["ellipticity"] >= cut) | np.isnan(catalog["ellipticity"]))
-    ]
 
 
 def check_index_ncoords_columns(catalog):
