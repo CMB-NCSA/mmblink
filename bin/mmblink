@@ -32,6 +32,12 @@ def cmdline():
                         help="Also detect negative soruces")
     parser.add_argument("--write_obscat", action='store_true', default=False,
                         help="Write out the catalogs for each obsID/band")
+    parser.add_argument("--write_full_obscat", action='store_true', default=False,
+                        help=(
+                            "Write out the full catalogs for each obsID/band with all metadata and columns. "
+                            "Only works with modular set."
+                        )
+    )
     parser.add_argument("--stamp_size", type=float, action='store', default=10,
                         help="Size (in arcmin) of the stamps to be cut [default:10 arcmin]")
     parser.add_argument("--prefix", type=str, action='store', default="SPT3G",
@@ -74,10 +80,10 @@ def cmdline():
                         help="The number of threads used by numexpr 0=automatic, 1=single [default]")
 
     parser.add_argument("--modular", action="store_true", default=False,
-        help=(
-            "Use modular processing for detection. "
-            "Currently only performs detection per file without collection."
-        )
+        help="Use the modular processing architecture instead."
+    )
+    parser.add_argument("--read_obscat", action="store_true", default=False,
+        help="Read the observation catalogs from files instead of performing detection."
     )
 
     args = parser.parse_args()
@@ -103,9 +109,18 @@ if __name__ == "__main__":
     g3d = du.g3detect(**args.__dict__)
 
     if args.modular:
-        # Run detections using modular processing for each file. Currently,
-        # no further processing can be performed after the per file detection.
-        g3d.run_detection_modular()
+        # Run using the modular processing architecture.
+
+        if args.read_obscat:
+            g3d.load_detection_files()
+        else:
+            g3d.run_detection_modular()
+
+        if args.dual_detection:
+            g3d.collect_dual()
+        else:
+            g3d.collect_single()
+
     else:
         # Run the detection on all input files that match detection bands
         g3d.run_detection_files()

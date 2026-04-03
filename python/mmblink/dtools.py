@@ -10,7 +10,7 @@ from astropy.stats import SigmaClip
 from astropy.coordinates import SkyCoord
 from astropy.coordinates import FK5
 from astropy.coordinates import search_around_sky
-from astropy.table import Table, vstack
+from astropy.table import QTable, Table, vstack
 import photutils.background
 import logging
 from logging.handlers import RotatingFileHandler
@@ -164,6 +164,7 @@ class g3detect:
             self.centroids = {}
             for band in self.config.detect_bands:
                 self.cat[band] = {}
+        self.detect_catalogs = []
 
     def setup_logging(self):
         """
@@ -575,6 +576,19 @@ class g3detect:
         self.logger.info(f"Extracted all bands from all files as: {self.all_bands}")
         self.logger.info(f"Total time: {elapsed_time(t0)} for [run_detection_files]")
 
+    def load_detection_files(self):
+        files = self.config.files
+        results = [None] * len(files)
+        for index, file in enumerate(files):
+            try:
+                results[index] = QTable.read(file, format="ascii.ecsv")
+            except Exception as e:
+                message = f"Occurred at file {file}."
+                e.add_note(message)
+                raise
+        self.detect_catalogs = results
+        return results
+
     def run_detection_modular(self):
         """Run detection on the files, loading each one modularly when needed.
 
@@ -618,7 +632,7 @@ class g3detect:
             failing file.
         """
         files = self.config.files
-        results = [None] * len(files)
+        results = [(None, None)] * len(files)
         for index, file in enumerate(files):
             try:
                 results[index] = detect_in_file(file, self.config)
@@ -626,6 +640,9 @@ class g3detect:
                 message = f"Occurred at file {file}."
                 e.add_note(message)
                 raise
+        self.detect_catalogs = [
+            catalog for segm, catalog in results if catalog is not None
+        ]
         return results
 
     def run_detection_async_modular(self):
@@ -649,7 +666,7 @@ class g3detect:
             failing file.
         """
         files = self.config.files
-        results = [None] * len(files)
+        results = [(None, None)] * len(files)
         with ProcessPoolExecutor(max_workers=self.NP) as executor:
             future_to_index = {
                 executor.submit(detect_in_file, file, self.config): index
@@ -667,6 +684,9 @@ class g3detect:
                     message = f"Occurred at file {files[index]}."
                     e.add_note(message)
                     raise
+        self.detect_catalogs = [
+            catalog for segm, catalog in results if catalog is not None
+        ]
         return results
 
     def run_detection_mp(self):
@@ -779,9 +799,55 @@ class g3detect:
         self.logger.info("---------------------------- Done dual band -------------------------")
         return
 
+    def match_dual_bands_list(self):
+        """Match sources in the same observation detected in two bands.
+
+        The matched catalogs are stored in self.matched_cat. This function uses
+        the list of detection catalogs stored in detect_catalogs for matching.
+
+        Returns
+        -------
+        matched : dict
+            Dictionary mapping obsID to a matched catalog of sources.
+        """
+
+        if len(self.config.detect_bands) != 2:
+            self.logger.info(f"Not enough bands: {self.config.detect_bands} to run dual match")
+            return
+
+        catalogs_by_obsid = {}
+        for catalog in self.detect_catalogs:
+            catalog_list = catalogs_by_obsid.get(catalog.meta["obsID"])
+            if catalog_list is None:
+                catalogs_by_obsid[catalog.meta["obsID"]] = [catalog]
+            else:
+                catalog_list.append(catalog)
+
+        matched_cat = {}
+        for obsid, catalogs in catalogs_by_obsid.items():
+            bands = [catalog.meta["band"] for catalog in catalogs]
+            if set(bands) == set(self.config.detect_bands):
+                cat1 = catalogs[0]
+                cat2 = catalogs[1]
+                band1 = cat1.meta["band"]
+                band2 = cat2.meta["band"]
+                self.logger.info(f"Attempting dual band match for obsID: {obsid} -- {band1} vs {band2}")
+                matched = find_dual_detections(cat1, cat2)
+                if matched is None:
+                    continue
+                matched_cat[obsid] = matched
+            else:
+                self.logger.debug(f"No dual match for {obsid}, bands: {bands}.")
+        self.logger.info("---------------------------- Done dual band -------------------------")
+        self.matched_cat = matched_cat
+        return matched_cat
+
     def collect_dual(self):
         # Function to collect and match sources in dual detection
-        self.match_dual_bands()
+        if self.config.modular:
+            self.match_dual_bands_list()
+        else:
+            self.match_dual_bands()
         # if no matches we end here
         if len(self.matched_cat) == 0:
             self.logger.warning("No sources could be matched -- stopping here")
@@ -804,13 +870,25 @@ class g3detect:
         # Make a per band call to find_unique_centroids() in order to get
         # the unique centroids in each of the detection bands
         # Store the centroids in dict keyed to band.
+        if self.config.modular:
+            catalogs_by_band = {}
+            for catalog in self.detect_catalogs:
+                catalogs = catalogs_by_band.get(catalog.meta["band"])
+                if catalogs is None:
+                    catalogs_by_band[catalog.meta["band"]] = {
+                        catalog.meta["obsID"]: catalog
+                    }
+                else:
+                    catalogs[catalog.meta["obsID"]] = catalog
+        else:
+            catalogs_by_band = self.cat
         for band in self.config.detect_bands:
             self.logger.info(f"Getting unique centroids for band: {band}")
             # Proceed only if we have any catalogs
-            if len(self.cat[band]) == 0:
+            if len(catalogs_by_band[band]) == 0:
                 self.logger.warning(f"Skipping band: {band} --  no catalogs")
                 continue
-            self.centroids[band] = find_unique_centroids(self.cat[band],
+            self.centroids[band] = find_unique_centroids(catalogs_by_band[band],
                                                          separation=self.config.max_sep,
                                                          plot=False)
         # And now get the unique/stacked centroids
@@ -1186,6 +1264,11 @@ def detect_in_file(filename, config):
                 )
 
             add_obs_column(cat)
+
+            if config.write_full_obscat:
+                # Write out the entire catalog with all columns and metadata.
+                catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
+                cat.write(catname, overwrite=True, format="ascii.ecsv")
 
             return segm, cat
     else:
