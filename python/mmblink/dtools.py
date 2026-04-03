@@ -2090,20 +2090,22 @@ def compute_rms2D(data, mask=None, box=200, filter_size=(3, 3), sigmaclip=None):
     - If a mask is provided, the data is masked by replacing the masked areas with `NaN`,
       which prevents them from affecting the background estimation.
     """
-    # in case we want to clip values
-    if sigmaclip:
-        sigma_clip = SigmaClip(sigma=sigmaclip)
-    else:
-        sigma_clip = None
 
-    # Set up the background estimator
-    bkg_estimator = photutils.background.StdBackgroundRMS(sigma_clip)
-    # Masking does not work, as images have a large section that it's empty, instead we trick it
-    # by masking the input data with Nans
-    if mask is not None:
-        data = np.where(mask, np.nan, data)
-    bkg = photutils.background.Background2D(data, box, mask=None, filter_size=filter_size,
-                                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+    # Create a SigmaClip object for sigma clipping if necessary.
+    sigma_clip = SigmaClip(sigma=sigmaclip) if sigmaclip is not None else None
+
+    # Sigma clipping is already built into the Background2D object, so it is
+    # not needed for the estimator.
+    bkgrms_estimator = photutils.background.StdBackgroundRMS()
+
+    bkg = photutils.background.Background2D(
+        data,
+        box,
+        mask=mask,
+        filter_size=filter_size,
+        sigma_clip=sigma_clip,
+        bkgrms_estimator=bkgrms_estimator,
+    )
     return bkg
 
 def detect_with_photutils_no_log(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=20,
@@ -2123,7 +2125,7 @@ def detect_with_photutils_no_log(data, wgt=None, mask=None, nsigma_thresh=3.5, n
     # Define the threshold, array in the case of rms2D
     if rms2D:
         bkg = compute_rms2D(data, mask=mask, box=box, filter_size=filter_size, sigmaclip=sigmaclip)
-        sigma2D = bkg.background if mask is None else np.where(mask, np.nan, bkg.background)
+        sigma2D = bkg.background_rms if mask is None else np.where(mask, np.nan, bkg.background_rms)
         threshold = nsigma_thresh * sigma2D
         # Dump 2D rms image into a fits file
         if rms2Dimage:
@@ -2239,7 +2241,7 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
     if rms2D:
         t0 = time.time()
         bkg = compute_rms2D(data, mask=mask, box=box, filter_size=filter_size, sigmaclip=sigmaclip)
-        sigma2D = bkg.background if mask is None else np.where(mask, np.nan, bkg.background)
+        sigma2D = bkg.background_rms if mask is None else np.where(mask, np.nan, bkg.background_rms)
         # sigma2D = bkg.background
         threshold = nsigma_thresh * sigma2D
         LOGGER.debug(f"2D RMS computed in {elapsed_time(t0)}")
