@@ -41,7 +41,7 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.propagate = False
 
 PPRINT_KEYS = ['label', 'xcentroid', 'ycentroid', 'sky_centroid', 'sky_centroid_dms',
-               'max_value', 'ellipticity', 'area']
+               'max_value', 'snr_max', 'ellipticity', 'area']
 
 
 # Set matplotlib logger at warning level to disengable from default logger
@@ -425,7 +425,7 @@ class g3detect:
         field = self.header[key]['FIELD']
         band = self.header[key]['BAND']
         obsID = self.header[key]['OBSID']
-        segm, cat = detect_with_photutils(data, wgt=wgt, mask=mask,
+        segm_p, cat_p = detect_with_photutils(data, wgt=wgt, mask=mask,
                                           nsigma_thresh=self.config.nsigma_thresh,
                                           npixels=self.config.npixels, wcs=wcs,
                                           rms2D=self.config.rms2D,
@@ -433,6 +433,18 @@ class g3detect:
                                           box=self.config.rms2D_box,
                                           plot=self.config.plot,
                                           plot_name=plot_name, plot_title=plot_title)
+        if self.config.detect_negative:
+            # Allow detection for negative sources by inverting the map
+            segm_n, cat_n = detect_with_photutils(-data, wgt=wgt, mask=mask,
+                                              nsigma_thresh=self.config.nsigma_thresh,
+                                              npixels=self.config.npixels, wcs=wcs,
+                                              rms2D=self.config.rms2D,
+                                              box=self.config.rms2D_box)
+            cat_n['snr_max'] *= -1
+            cats = [c for c in [cat_p, cat_n] if c is not None]
+            cat = vstack(cats) if len(cats) > 0 else None
+        else:
+            cat = cat_p
 
         if cat is not None:
             # Remove objects that match the sources catalog for that field

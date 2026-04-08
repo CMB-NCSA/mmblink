@@ -28,6 +28,8 @@ def cmdline():
                               [i.e.: 90GHz, 150GHz, 200GHz], (default=90GHz 150GHz")
     parser.add_argument("--dual_detection", action='store_true', default=False,
                         help="Detection must be in both bands [90GHz, 150GHz]")
+    parser.add_argument("--detect_negative", action = 'store_true', default = False,
+                        help="Also detect negative soruces")
     parser.add_argument("--write_obscat", action='store_true', default=False,
                         help="Write out the catalogs for each obsID/band")
     parser.add_argument("--stamp_size", type=float, action='store', default=10,
