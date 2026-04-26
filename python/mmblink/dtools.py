@@ -641,7 +641,7 @@ class g3detect:
                 e.add_note(message)
                 raise
         self.detect_catalogs = [
-            catalog for segm, catalog in results if catalog is not None
+            catalog for catalog in results if catalog is not None
         ]
         return results
 
@@ -685,7 +685,7 @@ class g3detect:
                     e.add_note(message)
                     raise
         self.detect_catalogs = [
-            catalog for segm, catalog in results if catalog is not None
+            catalog for catalog in results if catalog is not None
         ]
         return results
 
@@ -1195,9 +1195,6 @@ def detect_in_file(filename, config):
 
     Returns
     -------
-    segm : photutils.segmentation.SegmentationImage or `None`
-        The segmentation map of detected sources or `None` if no sources were
-        found.
     catalog : astropy.table.Table or `None`
         A catalog of sources properties with each source in a row or `None` if
         no sources were found.
@@ -1246,7 +1243,7 @@ def detect_in_file(filename, config):
             ]
         if cat is None or len(cat) == 0:
             # Either no sources were detected or they were all filtered.
-            return None, None
+            return None
         else:
             # Add metadata to the catalog.
             cat.meta["band"] = band
@@ -1270,9 +1267,9 @@ def detect_in_file(filename, config):
                 catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
                 cat.write(catname, overwrite=True, format="ascii.ecsv")
 
-            return segm, cat
+            return cat
     else:
-        return None, None
+        return None
 
 
 def add_obs_column(catalog):
