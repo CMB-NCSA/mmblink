@@ -1,39 +1,37 @@
-import numpy as np
-import numpy.ma as ma
-import matplotlib.pyplot as plt
-from photutils.segmentation import SourceFinder
-from photutils.segmentation import SourceCatalog
-from scipy.stats import norm
-from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
-from astropy import units as u
-from astropy.stats import SigmaClip
-from astropy.coordinates import SkyCoord
-from astropy.coordinates import FK5
-from astropy.coordinates import search_around_sky
-from astropy.table import QTable, Table, vstack
-import photutils.background
+from concurrent.futures import ProcessPoolExecutor
+import copy
+import errno
+import importlib.metadata
 import logging
 from logging.handlers import RotatingFileHandler
-import sys
-import os
 import multiprocessing as mp
-import types
-import magic
-import errno
-import time
-import mmblink
-from spt3g import core, maps
-from spt3g import sources
-import fitsio
-from astropy.wcs import WCS
-from astropy.io import ascii
-from photutils.utils.exceptions import NoDetectionsWarning
-import mmblink.cutterlib as cutterlib
-import copy
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 from pathlib import Path
-
+import sys
+import time
+import types
 import warnings
+
+from astropy import units as u
+from astropy.coordinates import FK5, search_around_sky, SkyCoord
+from astropy.io import ascii
+from astropy.stats import SigmaClip
+from astropy.table import QTable, Table, vstack
+from astropy.wcs import WCS
+import fitsio
+import magic
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
+import numpy as np
+import numpy.ma as ma
+import photutils.background
+from photutils.segmentation import SourceCatalog, SourceFinder
+from photutils.utils.exceptions import NoDetectionsWarning
+from scipy.stats import norm
+from spt3g import core, maps, sources
+
+from . import cutterlib
+
 # to ignore astropy NoDetectionsWarning
 warnings.filterwarnings("ignore", category=NoDetectionsWarning)
 
@@ -184,7 +182,16 @@ class g3detect:
                       log_format=self.config.log_format,
                       log_format_date=self.config.log_format_date)
         self.logger.info(f"Logging Started at level:{self.config.loglevel}")
-        self.logger.info(f"Running mmblink version: {mmblink.__version__}")
+
+        try:
+            # Get the version from the package metadata.
+            version = importlib.metadata.version("mmblink")
+        except importlib.metadata.PackageNotFoundError:
+            # Get the hardcoded version with the risk of a circular import.
+            from mmblink import __version__
+            version = __version__
+
+        self.logger.info(f"Running mmblink version: {version}")
 
     def check_input_files(self):
         """

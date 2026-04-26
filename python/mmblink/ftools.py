@@ -1,18 +1,19 @@
-import mmblink.dtools as du
-from spt3g import core, maps, sources
-import numpy as np
-import logging
-import time
-import math
-from astropy.nddata import Cutout2D
-import astropy.io.fits
-import re
-import os
 import copy
+import logging
+import math
+import os
+import re
+import time
+
+import astropy.io.fits
+from astropy.nddata import Cutout2D
+from astropy.time import Time
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from astropy.time import Time
+import numpy as np
+from spt3g import core, maps, sources
 
+from . import dtools as du
 
 # Mapping of metadata to FITS keywords
 _keywords_map = {'ObservationStart': ('DATE-BEG', 'Observation start date'),
@@ -31,7 +32,7 @@ def g3_to_fits(g3file, output_dir=None, trim=True, compress=False, quantize_leve
 
     Parameters:
     - g3file (str): Input G3 file path.
-    - output_dir (str): The output directory for the fits files. 
+    - output_dir (str): The output directory for the fits files.
       If None, then it's the same as the input directory.
     - trim (bool): If True, trims the FITS image to a smaller region.
     - compress (bool): If True, compresses the FITS file.

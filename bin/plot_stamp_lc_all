@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-
-import mmblink.ftools as ft
 import argparse
 import os
+
+import mmblink.ftools as ft
 
 
 def cmdline():

@@ -1,40 +1,39 @@
 #!/usr/bin/env python
-
 """
 A set of simple proto-function to make postage stamps using fitsio
 Based on desthumbs code circa 2015 and adapted in time.
 This version was forked from spt3g_cutter (Feb 2025)
 rev: a80830503cd5fda0148a9cc5b0621b6372df8f72.
 """
-
-import fitsio
-import os
-import sys
-import mmblink.astrometry as astrometry
-import time
-import numpy
-import copy
 from collections import OrderedDict
-from astropy.wcs import WCS
-from astropy.utils.exceptions import AstropyWarning
+import copy
+import datetime
+import errno
+import json
 import logging
 from logging.handlers import RotatingFileHandler
-import warnings
 import multiprocessing
-import yaml
-import datetime
-import subprocess
-import numpy as np
-import pandas
-import dateutil
-from tempfile import mkdtemp
-import errno
-import shutil
+from multiprocessing.managers import DictProxy
+import os
 import psutil
+import shutil
+import subprocess
+import sys
+from tempfile import mkdtemp
+import time
+import warnings
+
 from astropy.io import fits
 from astropy.time import Time
-import json
-from multiprocessing.managers import DictProxy
+from astropy.utils.exceptions import AstropyWarning
+from astropy.wcs import WCS
+import dateutil
+import fitsio
+import numpy as np
+import pandas
+import yaml
+
+from . import astrometry
 
 core_G3Units_deg = 0.017453292519943295
 core_G3Units_rad = 1
@@ -625,12 +624,12 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
             # The hdunum for that extname
             HDUNUM = hdunum[EXTNAME]
             # Create a canvas
-            im_section[EXTNAME] = numpy.zeros((naxis1, naxis2))
+            im_section[EXTNAME] = np.zeros((naxis1, naxis2))
             # Read in the image section we want for SCI/WGT
             im_section[EXTNAME] = ifits[HDUNUM][int(y1):int(y2), int(x1):int(x2)]
             # Correct NAXIS1 and NAXIS2
-            naxis1 = numpy.shape(im_section[EXTNAME])[1]
-            naxis2 = numpy.shape(im_section[EXTNAME])[0]
+            naxis1 = np.shape(im_section[EXTNAME])[1]
+            naxis2 = np.shape(im_section[EXTNAME])[0]
             # Update the WCS in the headers and make a copy
             h_section[EXTNAME] = update_wcs_matrix(header[EXTNAME], x1, y1)
             # Add the objID to the header of the thumbnail
