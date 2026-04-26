@@ -578,14 +578,15 @@ class g3detect:
 
     def load_detection_files(self):
         files = self.config.files
-        results = [None] * len(files)
-        for index, file in enumerate(files):
+        results = []
+        for file in files:
             try:
-                results[index] = QTable.read(file, format="ascii.ecsv")
+                result = QTable.read(file, format="ascii.ecsv")
             except Exception as e:
                 message = f"Occurred at file {file}."
                 e.add_note(message)
                 raise
+            results.append(result)
         self.detect_catalogs = results
         return results
 
@@ -615,7 +616,7 @@ class g3detect:
         """Find detections across all files in order with modular loading.
 
         If any file raises an exception during the detection process:
-            - All remaining files are cancelled.
+            - All remaining files are canceled.
             - The process pool is shut down.
             - The exception is re-raised with a note of the failing file.
 
@@ -632,14 +633,15 @@ class g3detect:
             failing file.
         """
         files = self.config.files
-        results = [(None, None)] * len(files)
-        for index, file in enumerate(files):
+        results = []
+        for file in files:
             try:
-                results[index] = detect_in_file(file, self.config)
+                result = detect_in_file(file, self.config)
             except Exception as e:
                 message = f"Occurred at file {file}."
                 e.add_note(message)
                 raise
+            results.append(result)
         self.detect_catalogs = [
             catalog for catalog in results if catalog is not None
         ]
@@ -649,7 +651,7 @@ class g3detect:
         """Find detections across all files in parallel with modular loading.
 
         If any file raises an exception during the detection process:
-            - All remaining files are cancelled.
+            - All remaining files are canceled.
             - The process pool is shut down.
             - The exception is re-raised with a note of the failing file.
 
@@ -666,24 +668,25 @@ class g3detect:
             failing file.
         """
         files = self.config.files
-        results = [(None, None)] * len(files)
         with ProcessPoolExecutor(max_workers=self.NP) as executor:
-            future_to_index = {
-                executor.submit(detect_in_file, file, self.config): index
-                for index, file in enumerate(files)
-            }
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
+            futures = [
+                executor.submit(detect_in_file, file, self.config)
+                for file in files
+            ]
+            results = []
+            for index, future in enumerate(futures):
                 try:
-                    results[index] = future.result()
+                    result = future.result()
                 except Exception as e:
-                    # Shutting down the executor will not stop any processes that
-                    # are already running, so it may take some time for the
-                    # program to fully complete even after an exception is raised.
-                    executor.shutdown(wait=False, cancel_futures=True)
                     message = f"Occurred at file {files[index]}."
                     e.add_note(message)
+                    # Futures that are already running cannot be canceled, so it
+                    # may take some time for the program to fully complete even
+                    # after an exception is raised.
+                    for future in futures:
+                        future.cancel()
                     raise
+                results.append(result)
         self.detect_catalogs = [
             catalog for catalog in results if catalog is not None
         ]
