@@ -1214,7 +1214,7 @@ def detect_in_file(filename, config):
         plot_name = os.path.join(config.outdir, f"{obsid}_{band}_cat")
         plot_title = header["BAND"]
         field = header["FIELD"]
-        segm, cat = detect_with_photutils_no_log(
+        segm_p, cat_p = detect_with_photutils_no_log(
             flux,
             wgt=wgt,
             mask=mask,
@@ -1226,6 +1226,23 @@ def detect_in_file(filename, config):
             plot=config.plot,
             plot_name=plot_name, plot_title=plot_title
         )
+
+        if config.detect_negative:
+            segm_n, cat_n = detect_with_photutils_no_log(
+                -flux,
+                wgt=wgt,
+                mask=mask,
+                nsigma_thresh=config.nsigma_thresh,
+                npixels=config.npixels, wcs=wcs,
+                rms2D=config.rms2D,
+                rms2Dimage=config.rms2D_image,
+                box=config.rms2D_box,
+            )
+            cat_n['snr_max'] *= -1
+            cats = [c for c in [cat_p, cat_n] if c is not None]
+            cat = vstack(cats) if len(cats) > 0 else None
+        else:
+            cat = cat_p
 
         if cat is not None:
             # Remove objects that match the sources catalog for that field.
