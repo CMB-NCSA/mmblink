@@ -27,7 +27,6 @@ from astropy.io import fits
 from astropy.time import Time
 from astropy.utils.exceptions import AstropyWarning
 from astropy.wcs import WCS
-import dateutil
 import fitsio
 import numpy as np
 import pandas
@@ -771,18 +770,31 @@ def capture_job_metadata(args):
 
 
 def get_mean_date(date1, date2):
-    """ Gets the mean date betwenn to timestamps"""
-    # Need to try/except to catch dates for yearly maps
-    try:
-        D1 = pandas.to_datetime(date1)
-        D2 = pandas.to_datetime(date2)
-        date_mean = pandas.Timestamp((D1.value + D2.value)/2.).isoformat()
-    except (TypeError, dateutil.parser._parser.ParserError):
-        date_mean = date1
-        # add a warning for getting yearly map if required.
-        # This should not be in the light curve
+    """Get the mean date between two timestamps.
+
+    Parameters
+    ----------
+    date1 : str
+        The first date in ISOT format string.
+    date2 : str
+        The second date in ISOT format string.
+
+    Returns
+    -------
+    mean_date: str
+        The mean between the two dates in an ISOT format string.
+    """
+    if "yearly" in date1:
+        # Add a warning for getting yearly map.
+        # This should not be in the light curve.
         LOGGER.debug(f"Ran into yearly  map: {date1}")
-    return date_mean
+        return date1
+    d1 = Time(date1, format="isot")
+    d2 = Time(date2, format="isot")
+    date_mean = d1 + (d2 - d1) / 2
+    # Use precision 6 for consistency with the previous version of this function.
+    date_mean.precision = 6
+    return date_mean.isot
 
 
 def get_obs_dictionary(lightcurve):
