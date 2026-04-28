@@ -912,7 +912,7 @@ def write_lightcurve_band_filetype(lc, BAND, FILETYPE, args):
                        array=np.array(list(dict['flux_SCI'].values()), dtype=object), unit='mJy')
     col4 = fits.Column(name='flux_WGT', format=f'PD({max_epochs})',
                        array=np.array(list(dict['flux_WGT'].values()), dtype=object))
-    col5 = fits.Column(name='obsids', format='30A',
+    col5 = fits.Column(name='obsids', format=f'PD(max_epochs)',
                        array=np.array(list(dict['obsids'].values()), dtype=object))
     hdu = fits.BinTableHDU.from_columns([col1, col2, col3, col4, col5])
     hdu.header.set('TELESCOP', 'South Pole Telescope')
