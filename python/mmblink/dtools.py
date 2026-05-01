@@ -477,11 +477,17 @@ class g3detect:
             cat.meta['obsID'] = obsID
             cat.meta['field'] = field
 
+            cat.add_column(obsID, name="obs", index=0)
+            cat.add_column(f"{obsID}_{band}", name="obs_max", index=0)
+            cat.add_column(band, name="band", index=0)
+
             # Write out obsID+band catalogs if we want
             if self.config.write_obscat:
                 catname = os.path.join(self.config.outdir, f"{key}.cat")
-                ascii.write(cat[PPRINT_KEYS], catname, overwrite=True, format='fixed_width')
+                ascii.write(cat, catname, overwrite=True, format='fixed_width')
+
                 self.logger.info(f"Wrote catalog to: {catname}")
+
             # Store the bands for obsID that was catalogued
             if obsID not in self.bands:
                 self.bands[obsID] = []
