@@ -814,7 +814,7 @@ def get_obs_dictionary(lightcurve):
     return obs_dict
 
 
-def repack_lightcurve_band_filetype(lightcurve, BAND, FILETYPE, args):
+def repack_lightcurve_band_filetype(lightcurve, id_names, obs_dict, BAND, FILETYPE, args):
     "Repack the lightcurve dictionary keyed by objID"
 
     t0 = time.time()
@@ -824,10 +824,10 @@ def repack_lightcurve_band_filetype(lightcurve, BAND, FILETYPE, args):
     LOGGER.debug(f"Memory percent: {process.memory_percent()} %")
 
     # Select only the observation for the BAND/FILETYPE combination
-    observations = args.obs_dict[BAND][FILETYPE]
+    observations = obs_dict[BAND][FILETYPE]
 
     LC = {}
-    for objID in args.id_names:
+    for objID in id_names:
 
         dates_ave = []
         dates_beg = []

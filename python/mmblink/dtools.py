@@ -144,7 +144,6 @@ class g3detect:
             self.header = manager.dict()
             self.obsIDs = manager.list()
             self.bands = manager.dict()
-            self.files = manager.dict()
             self.cat = manager.dict()
             self.centroids = manager.dict()
             for band in self.config.detect_bands:
@@ -156,7 +155,6 @@ class g3detect:
             self.header = {}
             self.obsIDs = []
             self.bands = {}
-            self.files = {}
             # Catalogs per band
             self.cat = {}
             self.centroids = {}
@@ -205,17 +203,13 @@ class g3detect:
         Attributes:
             self.config.files (list): A list of file paths or a single text file
             containing file paths.
-            self.nfiles (int): The number of files to process, updated based
-            on the input type.
 
         Returns:
         None
         """
-        # The number of files to process
-        self.nfiles = len(self.config.files)
 
         t = magic.Magic(mime=True)
-        if self.nfiles == 1 and t.from_file(self.config.files[0]) == 'text/plain':
+        if len(self.config.files) == 1 and t.from_file(self.config.files[0]) == 'text/plain':
             self.logger.info(f"{self.config.files[0]} is a list of files")
             # Now read them in
             with open(self.config.files[0], 'r') as f:
@@ -226,10 +220,10 @@ class g3detect:
                     lines.append(line)
                 # lines = f.read().splitlines()
             self.logger.info(f"Read: {len(lines)} input files")
-            self.config.files = lines
-            self.nfiles = len(lines)
+            self.files = lines
         else:
-            self.logger.info(f"Detected list of [{self.nfiles}] files")
+            self.files = self.config.files.copy()
+            self.logger.info(f"Detected list of [{len(self.files)}] files")
 
     def load_g3frames(self, filename, k):
         """
@@ -247,7 +241,6 @@ class g3detect:
         Attributes:
             # self.config.bands (list): List of frequency bands to process (e.g., ['90GHz', '150GHz']).
             self.config.field (str): Optional field name to verify or substitute for SourceName.
-            self.nfiles (int): Total number of files being processed, used for logging.
 
         Returns:
             frames (list): A list of G3 frames containing map data for the specified bands.
@@ -259,7 +252,7 @@ class g3detect:
            """
         t0 = time.time()
         self.logger.info(f"Opening file: {filename}")
-        self.logger.info(f"Doing: {k}/{self.nfiles} files")
+        self.logger.info(f"Doing: {k}/{len(self.files)} files")
 
         frames = []
         metadata_extracted = False
@@ -528,7 +521,7 @@ class g3detect:
         if self.NP > 1:
             self.setup_logging()
         self.logger.info(f"Opening file: {filename}")
-        self.logger.info(f"Doing: {k}/{self.nfiles} files")
+        self.logger.info(f"Doing: {k}/{len(self.files)} files")
         # Check if g3 or FITS file
         filetype = g3_or_fits(filename)
         self.logger.info(f"This file: {filename} is a {filetype} file")
@@ -545,9 +538,6 @@ class g3detect:
         for key in keys:
             # Here we store the files used (per band) to get cutouts later
             band = self.header[key]['BAND']
-            if band not in self.files.keys():
-                self.files[band] = []
-            self.files[band].append(filename)
             # Call to detect_with_photutils per key. We will populate self.cat
             # and self.segm dictionary if sources are found.
             # We will only run detect_with_photutils_key if band in detection bands
@@ -558,7 +548,7 @@ class g3detect:
             else:
                 self.logger.info(f"Will not run detection for {key} -- not in detection bands")
 
-        self.logger.info(f"Completed: {k}/{self.nfiles} files")
+        self.logger.info(f"Completed: {k}/{len(self.files)} files")
         self.logger.info(f"Total time: {elapsed_time(t0)} for: {filename}")
 
     def run_detection_files(self):
@@ -577,16 +567,11 @@ class g3detect:
         # We add the obs and obs_max columns
         self.add_obs_column_to_cat()
 
-        # Once we go through all of the files, we store the actual available bands in a list
-        # which is actualy different than the list in self.config.detect_bands
-        self.all_bands = list(self.files.keys())
-        self.logger.info(f"Extracted all bands from all files as: {self.all_bands}")
         self.logger.info(f"Total time: {elapsed_time(t0)} for [run_detection_files]")
 
     def load_detection_files(self):
-        files = self.config.files
         results = []
-        for file in files:
+        for file in self.files:
             try:
                 result = QTable.read(file, format="ascii.ecsv")
             except Exception as e:
@@ -639,9 +624,8 @@ class g3detect:
             Re-raises any exception raised by a file, adding a note of the
             failing file.
         """
-        files = self.config.files
         results = []
-        for file in files:
+        for file in self.files:
             try:
                 result = detect_in_file(file, self.config)
             except Exception as e:
@@ -674,18 +658,17 @@ class g3detect:
             Re-raises any exception raised by a file, adding a note of the
             failing file.
         """
-        files = self.config.files
         with ProcessPoolExecutor(max_workers=self.NP) as executor:
             futures = [
                 executor.submit(detect_in_file, file, self.config)
-                for file in files
+                for file in self.files
             ]
             results = []
             for index, future in enumerate(futures):
                 try:
                     result = future.result()
                 except Exception as e:
-                    message = f"Occurred at file {files[index]}."
+                    message = f"Occurred at file {self.files[index]}."
                     e.add_note(message)
                     # Futures that are already running cannot be canceled, so it
                     # may take some time for the program to fully complete even
@@ -707,7 +690,7 @@ class g3detect:
         jobs = []
         self.logger.info(f"Will use {self.NP} processors")
         # Loop one to defined the jobs
-        for g3file in self.config.files:
+        for g3file in self.files:
             self.logger.info(f"Starting mp.Process for {g3file}")
             fargs = (g3file, k)
             p = mp.Process(target=self.run_detection_file, args=fargs)
@@ -744,7 +727,7 @@ class g3detect:
             p = mp.Pool(processes=self.NP, maxtasksperchild=1)
             self.logger.info(f"Will use {self.NP} processors")
             k = 1
-            for g3file in self.config.files:
+            for g3file in self.files:
                 fargs = (g3file, k)
                 kw = {}
                 self.logger.info(f"Starting apply_async.Process for {g3file}")
@@ -768,7 +751,7 @@ class g3detect:
         by calling run_detection_file for each file, one after another.
         """
         k = 1
-        for file in self.config.files:
+        for file in self.files:
             self.run_detection_file(file, k)
             k += 1
 
@@ -1034,30 +1017,28 @@ class g3detect:
         stage_prefix = os.path.join(stage_path, 'spt3g_cutter-stage-')
 
         k = 1
-        Nfiles = len(self.config.files)
-        for band in self.files.keys():
-            self.logger.info(f"Making cutouts for band: {band}")
-            for file in self.files[band]:
-                counter = f"{k}/{Nfiles} files"
-                ar = (file, ra, dec, cutout_dict, rejected_dict, lightcurve_dict)
-                kw = {'xsize': xsize, 'ysize': ysize, 'units': 'arcmin', 'objID': objID,
-                      'prefix': prefix, 'outdir': outdir, 'counter': counter,
-                      'get_lightcurve': get_lightcurve,
-                      'get_uniform_coverage': get_uniform_coverage,
-                      'nofits': no_fits,
-                      'stage': stage,
-                      'stage_prefix': stage_prefix,
-                      'obsid_names': True}
-                names, pos, lc = cutterlib.fitscutter(*ar, **kw)
-                cutout_dict.update(names)
-                rejected_dict.update(pos)
-                lightcurve_dict.update(lc)
-                k += 1
+        n_files = len(self.files)
+        for file in self.files:
+            counter = f"{k}/{n_files} files"
+            ar = (file, ra, dec, cutout_dict, rejected_dict, lightcurve_dict)
+            kw = {'xsize': xsize, 'ysize': ysize, 'units': 'arcmin', 'objID': objID,
+                    'prefix': prefix, 'outdir': outdir, 'counter': counter,
+                    'get_lightcurve': get_lightcurve,
+                    'get_uniform_coverage': get_uniform_coverage,
+                    'nofits': no_fits,
+                    'stage': stage,
+                    'stage_prefix': stage_prefix,
+                    'obsid_names': True}
+            names, pos, lc = cutterlib.fitscutter(*ar, **kw)
+            cutout_dict.update(names)
+            rejected_dict.update(pos)
+            lightcurve_dict.update(lc)
+            k += 1
 
         self.cutout_names = cutout_dict
         self.lightcurve = lightcurve_dict
-        self.config.id_names = cutterlib.get_id_names(ra, dec, prefix)
-        self.config.obs_dict = cutterlib.get_obs_dictionary(lightcurve_dict)
+        self.id_names = cutterlib.get_id_names(ra, dec, prefix)
+        self.obs_dict = cutterlib.get_obs_dictionary(lightcurve_dict)
         # Pass the centroids to the class
         self.ra_centroid = ra
         self.dec_centroid = dec
@@ -1068,9 +1049,9 @@ class g3detect:
         Repack and write the lightcurve dictionary as a FITS table.
 
         This function repacks the lightcurve data stored in `self.lightcurve`
-        for each band in the  `self.files` dictionary and writes it to a FITS
-        table. The output file is named according  to the predefined file naming
-        convention and the appropriate lightcurve data is processed  using the
+        for each band with observations and writes it to a FITS table. The
+        output file is named according  to the predefined file naming convention
+        and the appropriate lightcurve data is processed  using the
         `cutterlib.repack_lightcurve_band_filetype` function.
 
         Parameters:
@@ -1089,10 +1070,16 @@ class g3detect:
              `repack_lightcurve_band_filetype` function from `cutterlib`
              to write the FITS files.
         """
-        for BAND in self.files.keys():
-            FILETYPE = 'None'
-            ar = (self.lightcurve, BAND, FILETYPE, self.config)
-            cutterlib.repack_lightcurve_band_filetype(*ar)
+        for band in self.obs_dict.keys():
+            file_type = 'None'
+            cutterlib.repack_lightcurve_band_filetype(
+                self.lightcurve,
+                self.id_names,
+                self.obs_dict,
+                band,
+                file_type,
+                self.config,
+            )
 
     def repack_stamps(self):
         """
