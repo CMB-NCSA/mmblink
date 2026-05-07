@@ -1860,10 +1860,6 @@ def find_unique_centroids(table_centroids, separation=20, plot=False):
             ncoords = [len(x) for x in xx_pix]
         tblidx = np.arange(len(xc_sky)) + 1
 
-        # Before Update
-        logger.debug("Before Update")
-        logger.debug(f"\n{stacked_centroids}\n")
-
         # Update centroids with averages
         # Create a Skycoord object
         coords = SkyCoord(xc_sky, yc_sky, frame=FK5, unit='deg')
@@ -1885,10 +1881,6 @@ def find_unique_centroids(table_centroids, separation=20, plot=False):
         stacked_centroids['snr_max'].info.format = '.2f'
         stacked_centroids.add_index('index')
         logger.debug(f"centroids Done for {label1}")
-        logger.debug("After Update [find_unique_centroids]")
-        logger.debug("#### stacked_centroids ####")
-        logger.debug(f"\n{stacked_centroids}")
-        logger.debug("#### ---------  ####\n")
 
     return stacked_centroids
 
