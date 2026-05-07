@@ -571,7 +571,7 @@ class g3detect:
 
     def load_detection_files(self):
         results = []
-        for file in self.files:
+        for file in self.config.detect_cat:
             try:
                 result = QTable.read(file, format="ascii.ecsv")
             except Exception as e:
