@@ -876,7 +876,8 @@ def detect_sources_in_file(filename, config):
                 rms2D=config.rms2D,
                 box=config.rms2D_box,
             )
-            cat_n['snr_max'] *= -1
+            if cat_n is not None:
+                cat_n['snr_max'] *= -1
             cats = [c for c in [cat_p, cat_n] if c is not None]
             cat = vstack(cats) if len(cats) > 0 else None
         else:
