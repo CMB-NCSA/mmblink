@@ -14,7 +14,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
     "pandas>=3.0.0",
-    "photutils>=2.3.0",
+    "photutils==2.3.0",
     "psutil>=7.2.2",
     "python-magic>=0.4.27",
     "pyyaml>=6.0.3",

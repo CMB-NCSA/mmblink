@@ -1,38 +1,35 @@
-import numpy as np
-import numpy.ma as ma
-import matplotlib.pyplot as plt
-from photutils.segmentation import SourceFinder
-from photutils.segmentation import SourceCatalog
-from scipy.stats import norm
-from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
-from astropy import units as u
-from astropy.stats import SigmaClip
-from astropy.coordinates import SkyCoord
-from astropy.coordinates import FK5
-from astropy.coordinates import search_around_sky
-from astropy.table import Table, vstack
-import photutils.background
+from concurrent.futures import ProcessPoolExecutor
+import copy
+import importlib.metadata
 import logging
 from logging.handlers import RotatingFileHandler
-import sys
 import os
-import multiprocessing as mp
-import types
-import magic
-import errno
-import time
-import mmblink
-from spt3g import core, maps
-from spt3g import sources
-import fitsio
-from astropy.wcs import WCS
-from astropy.io import ascii
-from photutils.utils.exceptions import NoDetectionsWarning
-import mmblink.cutterlib as cutterlib
-import copy
 from pathlib import Path
-
+import sys
+import time
+import types
 import warnings
+
+from astropy import units as u
+from astropy.coordinates import FK5, search_around_sky, SkyCoord
+from astropy.io import ascii
+from astropy.stats import SigmaClip
+from astropy.table import QTable, Table, vstack
+from astropy.wcs import WCS
+import fitsio
+import magic
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
+import numpy as np
+import numpy.ma as ma
+import photutils.background
+from photutils.segmentation import SourceCatalog, SourceFinder
+from photutils.utils.exceptions import NoDetectionsWarning
+from scipy.stats import norm
+from spt3g import core, maps, sources
+
+from . import cutterlib
+
 # to ignore astropy NoDetectionsWarning
 warnings.filterwarnings("ignore", category=NoDetectionsWarning)
 
@@ -56,7 +53,6 @@ cutterlib.FITS_LC_OUTNAME = "{outdir}/lightcurve_{filter}.{ext}"
 
 
 class g3detect:
-
     """
     A class to run and manage transient detections on SPT (South Pole Telescope)
     files/frames.
@@ -71,8 +67,6 @@ class g3detect:
     class methods.
     """
 
-    """ A Class to run and manage Transient detections on SPT files/frames"""
-
     def __init__(self, **keys):
         """
         Initializes the detect_3gworker class with the provided configuration keys.
@@ -83,11 +77,6 @@ class g3detect:
         Parameters:
         - **keys (dict): A variable number of keyword arguments representing
           configuration settings.
-
-        Returns: None
-        Raises:
-        - FileNotFoundError: If any input files are missing during the file check.
-        - KeyError: If a required configuration key is missing.
         """
 
         # Load the configurarion
@@ -97,72 +86,10 @@ class g3detect:
         self.logger = LOGGER
         self.setup_logging()
 
-        # Prepare things
-        self.prepare()
+        os.makedirs(self.config.outdir, mode=0o755, exist_ok=True)
 
         # Check input files vs file list
         self.check_input_files()
-
-    def prepare(self):
-        """
-        Initializes necessary variables and prepares the environment for
-        transient detection.
-
-        This method performs several tasks to prepare for running transient detection,
-        including:
-        - Determining the number of processors (NP) to use based on the configuration.
-        - Creating necessary output directories if they do not exist.
-        - Initializing dictionaries to store data, using manager dictionaries for
-          multiprocessing when applicable.
-
-        Specifically, it:
-        - Retrieves the number of processors (`NP`) based on the configuration and
-          adjusts the setup accordingly.
-        - Creates an output directory (`outdir`) for storing results.
-        - Initializes shared data structures (such as dictionaries and lists) for
-          managing data in a multiprocessing environment.
-          - If `NP > 1` (multiprocessing), it uses `mp.Manager()` to create shared
-            dictionaries and lists for parallel processing.
-          - Otherwise, it uses regular Python dictionaries and lists for
-            single-threaded execution.
-
-        Raises:
-        - FileNotFoundError: If the output directory cannot be created.
-        - OSError: If there are issues during multiprocessing setup or directory creation.
-        """
-
-        # Get the number of processors to use
-        self.NP = get_NP(self.config.np)
-        create_dir(self.config.outdir)
-
-        # Dictionaries to store the data, we need manager dictionaries when
-        # using multiprocessing
-        if self.NP > 1:
-            manager = mp.Manager()
-            self.flux = manager.dict()
-            self.flux_wgt = manager.dict()
-            self.flux_mask = manager.dict()
-            self.header = manager.dict()
-            self.obsIDs = manager.list()
-            self.bands = manager.dict()
-            self.files = manager.dict()
-            self.cat = manager.dict()
-            self.centroids = manager.dict()
-            for band in self.config.detect_bands:
-                self.cat[band] = manager.dict()
-        else:
-            self.flux = {}
-            self.flux_wgt = {}
-            self.flux_mask = {}
-            self.header = {}
-            self.obsIDs = []
-            self.bands = {}
-            self.files = {}
-            # Catalogs per band
-            self.cat = {}
-            self.centroids = {}
-            for band in self.config.detect_bands:
-                self.cat[band] = {}
 
     def setup_logging(self):
         """
@@ -182,7 +109,16 @@ class g3detect:
                       log_format=self.config.log_format,
                       log_format_date=self.config.log_format_date)
         self.logger.info(f"Logging Started at level:{self.config.loglevel}")
-        self.logger.info(f"Running mmblink version: {mmblink.__version__}")
+
+        try:
+            # Get the version from the package metadata.
+            version = importlib.metadata.version("mmblink")
+        except importlib.metadata.PackageNotFoundError:
+            # Get the hardcoded version with the risk of a circular import.
+            from mmblink import __version__
+            version = __version__
+
+        self.logger.info(f"Running mmblink version: {version}")
 
     def check_input_files(self):
         """
@@ -196,17 +132,13 @@ class g3detect:
         Attributes:
             self.config.files (list): A list of file paths or a single text file
             containing file paths.
-            self.nfiles (int): The number of files to process, updated based
-            on the input type.
 
         Returns:
         None
         """
-        # The number of files to process
-        self.nfiles = len(self.config.files)
 
         t = magic.Magic(mime=True)
-        if self.nfiles == 1 and t.from_file(self.config.files[0]) == 'text/plain':
+        if len(self.config.files) == 1 and t.from_file(self.config.files[0]) == 'text/plain':
             self.logger.info(f"{self.config.files[0]} is a list of files")
             # Now read them in
             with open(self.config.files[0], 'r') as f:
@@ -217,10 +149,10 @@ class g3detect:
                     lines.append(line)
                 # lines = f.read().splitlines()
             self.logger.info(f"Read: {len(lines)} input files")
-            self.config.files = lines
-            self.nfiles = len(lines)
+            self.files = lines
         else:
-            self.logger.info(f"Detected list of [{self.nfiles}] files")
+            self.files = self.config.files.copy()
+            self.logger.info(f"Detected list of [{len(self.files)}] files")
 
     def load_g3frames(self, filename, k):
         """
@@ -238,7 +170,6 @@ class g3detect:
         Attributes:
             # self.config.bands (list): List of frequency bands to process (e.g., ['90GHz', '150GHz']).
             self.config.field (str): Optional field name to verify or substitute for SourceName.
-            self.nfiles (int): Total number of files being processed, used for logging.
 
         Returns:
             frames (list): A list of G3 frames containing map data for the specified bands.
@@ -250,7 +181,7 @@ class g3detect:
            """
         t0 = time.time()
         self.logger.info(f"Opening file: {filename}")
-        self.logger.info(f"Doing: {k}/{self.nfiles} files")
+        self.logger.info(f"Doing: {k}/{len(self.files)} files")
 
         frames = []
         metadata_extracted = False
@@ -292,54 +223,6 @@ class g3detect:
             frames.append(frame)
         self.logger.info(f"Total metadata time: {elapsed_time(t0)} for: {filename}")
         return frames
-
-    def load_fits_map(self, filename):
-        """
-        Load FITS data and metadata from a file.
-
-        Parameters:
-            filename (str): Path to the FITS file.
-
-        Returns:
-            list: Observation key if the file is loaded, or an empty list if skipped.
-        Notes:
-           - Skips files if their band is not in the configured list of bands.
-           - Reads SCI and WGT HDUs, storing flux, weight, and mask arrays.
-           - Adds observation ID to the list of loaded observation IDs.
-        """
-
-        # Get header/extensions/hdu
-        t0 = time.time()
-        header, hdunum = cutterlib.get_headers_hdus(filename)
-        key = f"{header['SCI']['OBSID']}_{header['SCI']['BAND']}"
-        self.logger.info(f"Setting observation key as: {key}")
-        self.logger.debug(f"Done Getting header, hdus: {elapsed_time(t0)}")
-        extnames = header.keys()  # Gets SCI and WGT
-        HDU_SCI = hdunum['SCI']
-        HDU_WGT = hdunum['WGT']
-        self.logger.debug(f"Found EXTNAMES:{extnames}")
-
-        # Intitialize the FITS object
-        ifits = fitsio.FITS(filename, 'r')
-        self.logger.debug(f"Done loading fitsio.FITS({filename}): {elapsed_time(t0)}")
-        self.logger.debug("Reading SCI HDU")
-        self.header[key] = header['SCI']
-        self.flux[key] = ifits[HDU_SCI].read()
-        self.logger.debug("Reading WGT HDU")
-        self.flux_wgt[key] = ifits[HDU_WGT].read()
-        ifits.close()
-        self.logger.debug("Done Reading")
-        self.flux_mask[key] = np.where(self.flux_wgt[key] != 0, int(1), 0)
-        self.logger.debug(f"Min/Max Flux: {self.flux[key].min()} {self.flux[key].max()}")
-        self.logger.debug(f"Min/Max Wgt: {self.flux_wgt[key].min()} {self.flux_wgt[key].max()}")
-        self.logger.info(f"Done loading filename: {filename} in {elapsed_time(t0)}")
-
-        # Adding obsID to list of loaded list
-        obsID = header['SCI']['OBSID']
-        if obsID not in self.obsIDs:
-            self.obsIDs.append(obsID)
-
-        return [key]
 
     def load_g3frame_map(self, frame):
         """
@@ -390,7 +273,8 @@ class g3detect:
             g3_mask = frame["T"].to_mask()
             g3_mask_map = g3_mask.to_map()
             flux_mask = np.asarray(g3_mask_map)
-            self.flux_mask[key] = np.where(flux_mask == 1, int(1), 0)
+            # Mask is True for pixels with no data.
+            self.flux_mask[key] = flux_mask == 0
         except Exception as e:
             self.logger.warning(e.message)
             self.flux_mask[key] = None
@@ -398,97 +282,6 @@ class g3detect:
         # Adding obsID to list of loaded list
         if obsID not in self.obsIDs:
             self.obsIDs.append(obsID)
-        return key
-
-    def detect_with_photutils_key(self, key, write=False):
-        """
-        Detect sources in the map for a given key using Photutils.
-
-        Parameters:
-            key (str): The observation key for the data to process.
-
-        Returns:
-            str: The observation key if detections are made, else None.
-
-        Notes:
-            - Uses flux, weight, and mask data for detection.
-            - Applies a source detection algorithm via Photutils.
-            - Removes sources near known cataloged objects for the field.
-            - Updates catalog metadata and tracks bands per observation ID.
-        """
-        data = self.flux[key]
-        wgt = self.flux_wgt[key]
-        mask = self.flux_mask[key]
-        wcs = WCS(self.header[key])
-        plot_name = os.path.join(self.config.outdir, f"{key}_cat")
-        plot_title = self.header[key]['BAND']
-        # Extract field, obsid and band
-        field = self.header[key]['FIELD']
-        band = self.header[key]['BAND']
-        obsID = self.header[key]['OBSID']
-        segm_p, cat_p = detect_with_photutils(data, wgt=wgt, mask=mask,
-                                          nsigma_thresh=self.config.nsigma_thresh,
-                                          npixels=self.config.npixels, wcs=wcs,
-                                          rms2D=self.config.rms2D,
-                                          rms2Dimage=self.config.rms2D_image,
-                                          box=self.config.rms2D_box,
-                                          plot=self.config.plot,
-                                          plot_name=plot_name, plot_title=plot_title)
-        if self.config.detect_negative:
-            # Allow detection for negative sources by inverting the map
-            segm_n, cat_n = detect_with_photutils(-data, wgt=wgt, mask=mask,
-                                              nsigma_thresh=self.config.nsigma_thresh,
-                                              npixels=self.config.npixels, wcs=wcs,
-                                              rms2D=self.config.rms2D,
-                                              box=self.config.rms2D_box)
-            cat_n['snr_max'] *= -1
-            cats = [c for c in [cat_p, cat_n] if c is not None]
-            cat = vstack(cats) if len(cats) > 0 else None
-        else:
-            cat = cat_p
-
-        if cat is not None:
-            # Remove objects that match the sources catalog for that field
-            if self.config.no_remove_source == False:
-                cat = remove_objects_near_sources(cat, field, self.config.point_source_file)
-
-            # Cut in ellipticity -- first replace nan for a large number (i.e. 99)
-            e = cat['ellipticity']
-            e[np.isnan(e)] = 99
-            cat['ellipticity'] = e
-            inds_ell = np.where(cat['ellipticity'] >= self.config.ell_cut)[0]
-            nr = len(inds_ell)
-            if nr > 0:
-                catsize = len(cat)
-                self.logger.info(f"Removing {nr} source(s) with ellipticity >= {self.config.ell_cut}")
-                self.logger.debug("Will remove:")
-                if self.logger.getEffectiveLevel() == logging.DEBUG:
-                    print(cat[PPRINT_KEYS][inds_ell])
-                cat = cat[~np.isin(np.arange(catsize), inds_ell)]
-
-        # if no detections (i.e. None) or no objecs in catalog (i.e. all objects were removed)
-        # we wont pass it up to the dictionary of catalogs (self.cat)
-        if cat is None or len(cat) == 0:
-            self.logger.info(f"Will not include key: {key} from catalog dictionary ")
-            del cat
-        else:
-            # Add metadata to the catalog we just created
-            cat.meta['band'] = band
-            cat.meta['obsID'] = obsID
-            cat.meta['field'] = field
-
-            # Write out obsID+band catalogs if we want
-            if self.config.write_obscat:
-                catname = os.path.join(self.config.outdir, f"{key}.cat")
-                ascii.write(cat[PPRINT_KEYS], catname, overwrite=True, format='fixed_width')
-                self.logger.info(f"Wrote catalog to: {catname}")
-            # Store the bands for obsID that was catalogued
-            if obsID not in self.bands:
-                self.bands[obsID] = []
-            self.bands[obsID].append(band)
-            # And now we put the new catalog (cat) in the class dictionary
-            self.cat[band][obsID] = cat
-
         return key
 
     def add_obs_column_to_cat(self):
@@ -517,7 +310,7 @@ class g3detect:
         if self.NP > 1:
             self.setup_logging()
         self.logger.info(f"Opening file: {filename}")
-        self.logger.info(f"Doing: {k}/{self.nfiles} files")
+        self.logger.info(f"Doing: {k}/{len(self.files)} files")
         # Check if g3 or FITS file
         filetype = g3_or_fits(filename)
         self.logger.info(f"This file: {filename} is a {filetype} file")
@@ -534,9 +327,6 @@ class g3detect:
         for key in keys:
             # Here we store the files used (per band) to get cutouts later
             band = self.header[key]['BAND']
-            if band not in self.files.keys():
-                self.files[band] = []
-            self.files[band].append(filename)
             # Call to detect_with_photutils per key. We will populate self.cat
             # and self.segm dictionary if sources are found.
             # We will only run detect_with_photutils_key if band in detection bands
@@ -547,7 +337,7 @@ class g3detect:
             else:
                 self.logger.info(f"Will not run detection for {key} -- not in detection bands")
 
-        self.logger.info(f"Completed: {k}/{self.nfiles} files")
+        self.logger.info(f"Completed: {k}/{len(self.files)} files")
         self.logger.info(f"Total time: {elapsed_time(t0)} for: {filename}")
 
     def run_detection_files(self):
@@ -566,140 +356,199 @@ class g3detect:
         # We add the obs and obs_max columns
         self.add_obs_column_to_cat()
 
-        # Once we go through all of the files, we store the actual available bands in a list
-        # which is actualy different than the list in self.config.detect_bands
-        self.all_bands = list(self.files.keys())
-        self.logger.info(f"Extracted all bands from all files as: {self.all_bands}")
         self.logger.info(f"Total time: {elapsed_time(t0)} for [run_detection_files]")
 
-    def run_detection_mp(self):
+    def load_detection_files(self):
+        self.logger.info("Loading detect_cat files for detections.")
+        results = []
+        for file in self.config.detect_cat:
+            try:
+                result = QTable.read(file, format="ascii.ecsv")
+            except Exception as e:
+                message = f"Occurred at file {file}."
+                e.add_note(message)
+                raise
+            results.append(result)
+        self.detect_catalogs = results
+        return results
+
+    def detect_all_sources(self):
+        """Run detection on the files, loading each one modularly when needed.
+
+        Returns
+        -------
+        results : list
+            List of results in the same order as the files. Each element is the
+            result of running detect_sources_in_file on that file.
+
+        Raises
+        ------
+        Exception
+            Re-raises any exception raised by a file, adding a note of the
+            failing file.
         """
-        Run g3 files using multiprocessing.Process in chunks of NP.
+        if self.config.np > 1:
+            self.logger.warning(
+                "Multiprocessing is currently disabled. "
+                "Running detection jobs serially."
+            )
+            return self.detect_all_sources_serial()
+            # self.logger.info("Running detection jobs with multiprocessing")
+            # return self.detect_all_sources_async()
+        else:
+            self.logger.info("Running detection jobs serially")
+            return self.detect_all_sources_serial()
+
+    def detect_all_sources_serial(self):
+        """Find detections across all files in order with modular loading.
+
+        If any file raises an exception during the detection process:
+            - All remaining files are canceled.
+            - The process pool is shut down.
+            - The exception is re-raised with a note of the failing file.
+
+        Returns
+        -------
+        results : list
+            List of results in the same order as the files. Each element is the
+            result of running detect_sources_in_file on that file.
+
+        Raises
+        ------
+        Exception
+            Re-raises any exception raised by a file, adding a note of the
+            failing file.
         """
-        k = 1
-        jobs = []
-        self.logger.info(f"Will use {self.NP} processors")
-        # Loop one to defined the jobs
-        for g3file in self.config.files:
-            self.logger.info(f"Starting mp.Process for {g3file}")
-            fargs = (g3file, k)
-            p = mp.Process(target=self.run_detection_file, args=fargs)
-            jobs.append(p)
-            k += 1
+        results = []
+        start_time = time.time()
+        for i, file in enumerate(self.files):
+            t0 = time.time()
+            try:
+                self.logger.info(f"Opening file: {file}")
+                self.logger.info(f"Doing: {i}/{len(self.files)} files")
+                result = detect_sources_in_file(file, self.config)
+            except Exception as e:
+                message = f"Occurred at file {file}."
+                e.add_note(message)
+                raise
+            results.append(result)
+            self.logger.info(f"Completed: {i}/{len(self.files)} files")
+            self.logger.info(f"Total time: {elapsed_time(t0)} for: {file}")
+        self.detect_catalogs = [
+            catalog for catalog in results if catalog is not None
+        ]
+        self.logger.info(
+            f"Total time: {elapsed_time(start_time)} for detecting all sources"
+        )
+        return results
 
-        # Loop over the process in chunks of size NP
-        for job_chunk in chunker(jobs, self.NP):
-            for job in job_chunk:
-                self.logger.info(f"Starting job: {job.name}")
-                job.start()
-            for job in job_chunk:
-                self.logger.info(f"Joining job: {job.name}")
-                job.join()
+    def detect_all_sources_async(self):
+        """Find detections across all files in parallel with modular loading.
 
-        # Update with returned dictionary, we need to make them real
-        # dictionaries, instead DictProxy objects returned from multiprocessing
-        self.logger.info("Updating returned dictionaries")
-        self.cat = self.cat.copy()
-        self.segm = self.segm.copy()
-        p.terminate()
+        If any file raises an exception during the detection process:
+            - All remaining files are canceled.
+            - The process pool is shut down.
+            - The exception is re-raised with a note of the failing file.
 
-    def run_detection_async(self):
+        Returns
+        -------
+        results : list
+            List of results in the same order as the files. Each element is the
+            result of running detect_sources_in_file on that file.
+
+        Raises
+        ------
+        Exception
+            Re-raises any exception raised by a file, adding a note of the
+            failing file.
         """
-        Run g3 files using multiprocessing.apply_async for parallel processing.
-
-        This method spawns a pool of processes to asynchronously apply the
-        run_detection_file function to each g3 file in the configuration.
-        It uses the 'spawn' context to avoid issues with SPT3G's pipe().
-        After processing, it converts DictProxy objects into regular dictionaries.
-        """
-        # It might have memory issues with spt3g pipe()
-        with mp.get_context('spawn').Pool() as p:
-            p = mp.Pool(processes=self.NP, maxtasksperchild=1)
-            self.logger.info(f"Will use {self.NP} processors")
-            k = 1
-            for g3file in self.config.files:
-                fargs = (g3file, k)
-                kw = {}
-                self.logger.info(f"Starting apply_async.Process for {g3file}")
-                p.apply_async(self.run_detection_file, fargs, kw)
-                k += 1
-            p.close()
-            p.join()
-
-        # Update with returned dictionary, we need to make them real
-        # dictionaries, instead DictProxy objects returned from multiprocessing
-        self.logger.info("Updating returned dictionaries")
-        self.cat = self.cat.copy()
-        self.segm = self.segm.copy()
-        p.terminate()
-
-    def run_detection_serial(self):
-        """
-        Run all g3 files serially.
-
-        This method processes each g3 file in the configuration sequentially
-        by calling run_detection_file for each file, one after another.
-        """
-        k = 1
-        for file in self.config.files:
-            self.run_detection_file(file, k)
-            k += 1
+        # When workers is None, as many workers as processors are used.
+        workers = None if self.config.np == 0 else self.config.np
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(detect_sources_in_file, file, self.config)
+                for file in self.files
+            ]
+            results = []
+            for index, future in enumerate(futures):
+                try:
+                    result = future.result()
+                except Exception as e:
+                    message = f"Occurred at file {self.files[index]}."
+                    e.add_note(message)
+                    # Futures that are already running cannot be canceled, so it
+                    # may take some time for the program to fully complete even
+                    # after an exception is raised.
+                    for future in futures:
+                        future.cancel()
+                    raise
+                results.append(result)
+        self.detect_catalogs = [
+            catalog for catalog in results if catalog is not None
+        ]
+        return results
 
     def match_dual_bands(self):
-        """
-        Perform dual band matching per observation with two bands.
+        """Match sources in the same observation detected in two bands.
 
-        This method checks if the configuration has exactly two bands and then attempts
-        to find dual detections between them for each observation. If a matching pair
-        of bands is found for an observation, it calls find_dual_detections to match
-        the catalog entries. The matched catalogs are stored in self.matched_cat.
+        The list of detection catalogs stored in detect_catalogs is used for
+        matching.
 
-        Returns:
-            dict: A dictionary where the keys are observation IDs (obsID) and the values
-                  are the matched catalog entries for the dual bands.
+        Returns
+        -------
+        matched : dict or None
+            Dictionary mapping obsID to a matched catalog of sources or None if
+            matching could not occur.
         """
+
         if len(self.config.detect_bands) != 2:
             self.logger.info(f"Not enough bands: {self.config.detect_bands} to run dual match")
-            return
-        self.matched_cat = {}
+            return None
 
-        # Loop over all of the observations
-        for k, obsID in enumerate(self.bands):
-            self.logger.debug(f"Dual Band {k+1}/{len(self.bands)}")
-            if set(self.bands[obsID]) == set(self.config.detect_bands):
-                band1 = self.bands[obsID][0]
-                band2 = self.bands[obsID][1]
-                cat1 = self.cat[band1][obsID]
-                cat2 = self.cat[band2][obsID]
-                self.logger.info(f"Attempting dual band match for obsID: {obsID} -- {band1} vs {band2}")
+        catalogs_by_obsid = {}
+        for catalog in self.detect_catalogs:
+            catalog_list = catalogs_by_obsid.get(catalog.meta["obsID"])
+            if catalog_list is None:
+                catalogs_by_obsid[catalog.meta["obsID"]] = [catalog]
+            else:
+                catalog_list.append(catalog)
+
+        matched_cat = {}
+        for obsid, catalogs in catalogs_by_obsid.items():
+            bands = [catalog.meta["band"] for catalog in catalogs]
+            if set(bands) == set(self.config.detect_bands):
+                cat1 = catalogs[0]
+                cat2 = catalogs[1]
+                band1 = cat1.meta["band"]
+                band2 = cat2.meta["band"]
+                self.logger.info(f"Attempting dual band match for obsID: {obsid} -- {band1} vs {band2}")
                 matched = find_dual_detections(cat1, cat2)
                 if matched is None:
                     continue
-                self.matched_cat[obsID] = matched
+                matched_cat[obsid] = matched
             else:
-                self.logger.debug(f"No dual match for {obsID}, bands: {self.bands[obsID]} ")
-
+                self.logger.debug(f"No dual match for {obsid}, bands: {bands}.")
         self.logger.info("---------------------------- Done dual band -------------------------")
-        return
+        return matched_cat
 
     def collect_dual(self):
         # Function to collect and match sources in dual detection
-        self.match_dual_bands()
-        # if no matches we end here
-        if len(self.matched_cat) == 0:
+
+        matched_dual = self.match_dual_bands()
+        if len(matched_dual) == 0:
             self.logger.warning("No sources could be matched -- stopping here")
-            exit()
             return
+
         self.logger.info("Running unique centroids for dual matching per obsID")
-        self.stacked_centroids = find_unique_centroids(self.matched_cat,
-                                                       separation=self.config.max_sep,
-                                                       plot=False)
+        self.stacked_centroids = find_unique_centroids(
+            matched_dual, separation=self.config.max_sep, plot=False
+        )
         # Remove non repeat sources
-        self.stacked_centroids = remove_non_repeat_sources(self.stacked_centroids,
-                                                           ncoords=self.config.nr)
+        self.stacked_centroids = remove_non_repeat_sources(
+            self.stacked_centroids, ncoords=self.config.nr
+        )
         # Write catalogs with centroids
         self.write_centroids(self.stacked_centroids)
-        return
 
     def collect_single(self):
         # Function to collect and match sources in single_detection
@@ -707,33 +556,43 @@ class g3detect:
         # Make a per band call to find_unique_centroids() in order to get
         # the unique centroids in each of the detection bands
         # Store the centroids in dict keyed to band.
-        for band in self.config.detect_bands:
+        catalogs_by_band = {}
+        for catalog in self.detect_catalogs:
+            catalogs = catalogs_by_band.get(catalog.meta["band"])
+            if catalogs is None:
+                catalogs_by_band[catalog.meta["band"]] = {
+                    catalog.meta["obsID"]: catalog
+                }
+            else:
+                catalogs[catalog.meta["obsID"]] = catalog
+        centroids = {}
+        for band, catalog in catalogs_by_band.items():
             self.logger.info(f"Getting unique centroids for band: {band}")
             # Proceed only if we have any catalogs
-            if len(self.cat[band]) == 0:
+            if len(catalog) > 0:
+                centroids[band] = find_unique_centroids(
+                    catalog, separation=self.config.max_sep, plot=False
+                )
+            else:
                 self.logger.warning(f"Skipping band: {band} --  no catalogs")
-                continue
-            self.centroids[band] = find_unique_centroids(self.cat[band],
-                                                         separation=self.config.max_sep,
-                                                         plot=False)
         # And now get the unique/stacked centroids
-        if len(self.centroids) == 0:
+        if len(centroids) == 0:
             self.logger.warning("Skipping stacked_centroids --  no catalogs")
             self.logger.warning("Will NOT write centroids")
             self.stacked_centroids = None
             return
 
-        self.stacked_centroids = find_unique_centroids(self.centroids,
-                                                       separation=self.config.max_sep,
-                                                       plot=False)
+        self.stacked_centroids = find_unique_centroids(
+            centroids, separation=self.config.max_sep, plot=False
+        )
         # Remove non repeat sources
-        self.stacked_centroids = remove_non_repeat_sources(self.stacked_centroids,
-                                                           ncoords=self.config.nr)
+        self.stacked_centroids = remove_non_repeat_sources(
+            self.stacked_centroids, ncoords=self.config.nr
+        )
         # Write catalogs with centroids and per band
         self.write_centroids(self.stacked_centroids)
-        for band in self.centroids.keys():
-            self.write_centroids(self.centroids[band], band=band)
-        return
+        for band, catalog in centroids.items():
+            self.write_centroids(catalog, band=band)
 
     def make_stamps_and_lighcurves(self):
         # Generate cutouts and repack stamps and lightcurve results
@@ -743,59 +602,6 @@ class g3detect:
         self.run_cutouts(self.stacked_centroids)
         self.repack_lc()
         self.repack_stamps()
-
-    def write_thumbnails_fitsio(self, key, size=60, clobber=True):
-        """
-        Create and write thumbnail FITS files for detected objects.
-
-        This method extracts the flux and weight data for the given catalog key, then
-        generates thumbnails for each detected object. It uses the object’s centroid
-        to crop the data around the detection and writes the cropped images (flux and
-        weight) to FITS files. The output file is named based on the object’s position
-        (RA, DEC) and other metadata such as the band and observation ID.
-
-        Args:
-            key (str): The key identifying the catalog to use for the detection.
-            size (int, optional): The size of the thumbnail (default is 60).
-            clobber (bool, optional): Whether to overwrite existing files (default is True).
-
-        Returns:
-            None
-        """
-        cat = self.cat[key]
-        data = self.flux[key]
-        wgt = self.flux_wgt[key]
-        hdr = self.header[key]
-        # Make a FITSHDR object
-        if not isinstance(hdr, fitsio.header.FITSHDR):
-            hdr = astropy2fitsio_header(hdr)
-
-        dx = int(size/2.0)
-        dy = int(size/2.0)
-        wcs = WCS(hdr)
-
-        for k in range(len(cat)):
-            t0 = time.time()
-            x0 = round(cat['xcentroid'][k])
-            y0 = round(cat['ycentroid'][k])
-            y1 = y0 - dy
-            y2 = y0 + dy
-            x1 = x0 - dx
-            x2 = x0 + dx
-            outname = f"{x0}_{y0}.fits"
-            thumb = data[int(y1):int(y2), int(x1):int(x2)]
-            thumb_wgt = wgt[int(y1):int(y2), int(x1):int(x2)]
-            h_section = cutterlib.update_wcs_matrix(hdr, x1, y1)
-            # Construct the name of the Thumbmail using BAND/FILTER/prefix/etc
-            ra, dec = wcs.wcs_pix2world(x0, y0, 1)
-            objID = cutterlib.get_thumbBaseName(ra, dec, prefix=self.config.prefix)
-            outname = cutterlib.get_thumbFitsName(ra, dec, hdr['BAND'], hdr['OBSID'],
-                                                  objID=objID, prefix='SPT', outdir=".")
-            ofits = fitsio.FITS(outname, 'rw', clobber=clobber)
-            ofits.write(thumb, extname='SCI', header=h_section)
-            ofits.write(thumb_wgt, extname='WGT', header=h_section)
-            ofits.close()
-            LOGGER.info(f"Done writing {outname}: {elapsed_time(t0)}")
 
     def run_cutouts(self, cat):
         """
@@ -849,30 +655,28 @@ class g3detect:
         stage_prefix = os.path.join(stage_path, 'spt3g_cutter-stage-')
 
         k = 1
-        Nfiles = len(self.config.files)
-        for band in self.files.keys():
-            self.logger.info(f"Making cutouts for band: {band}")
-            for file in self.files[band]:
-                counter = f"{k}/{Nfiles} files"
-                ar = (file, ra, dec, cutout_dict, rejected_dict, lightcurve_dict)
-                kw = {'xsize': xsize, 'ysize': ysize, 'units': 'arcmin', 'objID': objID,
-                      'prefix': prefix, 'outdir': outdir, 'counter': counter,
-                      'get_lightcurve': get_lightcurve,
-                      'get_uniform_coverage': get_uniform_coverage,
-                      'nofits': no_fits,
-                      'stage': stage,
-                      'stage_prefix': stage_prefix,
-                      'obsid_names': True}
-                names, pos, lc = cutterlib.fitscutter(*ar, **kw)
-                cutout_dict.update(names)
-                rejected_dict.update(pos)
-                lightcurve_dict.update(lc)
-                k += 1
+        n_files = len(self.files)
+        for file in self.files:
+            counter = f"{k}/{n_files} files"
+            ar = (file, ra, dec, cutout_dict, rejected_dict, lightcurve_dict)
+            kw = {'xsize': xsize, 'ysize': ysize, 'units': 'arcmin', 'objID': objID,
+                    'prefix': prefix, 'outdir': outdir, 'counter': counter,
+                    'get_lightcurve': get_lightcurve,
+                    'get_uniform_coverage': get_uniform_coverage,
+                    'nofits': no_fits,
+                    'stage': stage,
+                    'stage_prefix': stage_prefix,
+                    'obsid_names': True}
+            names, pos, lc = cutterlib.fitscutter(*ar, **kw)
+            cutout_dict.update(names)
+            rejected_dict.update(pos)
+            lightcurve_dict.update(lc)
+            k += 1
 
         self.cutout_names = cutout_dict
         self.lightcurve = lightcurve_dict
-        self.config.id_names = cutterlib.get_id_names(ra, dec, prefix)
-        self.config.obs_dict = cutterlib.get_obs_dictionary(lightcurve_dict)
+        self.id_names = cutterlib.get_id_names(ra, dec, prefix)
+        self.obs_dict = cutterlib.get_obs_dictionary(lightcurve_dict)
         # Pass the centroids to the class
         self.ra_centroid = ra
         self.dec_centroid = dec
@@ -883,9 +687,9 @@ class g3detect:
         Repack and write the lightcurve dictionary as a FITS table.
 
         This function repacks the lightcurve data stored in `self.lightcurve`
-        for each band in the  `self.files` dictionary and writes it to a FITS
-        table. The output file is named according  to the predefined file naming
-        convention and the appropriate lightcurve data is processed  using the
+        for each band with observations and writes it to a FITS table. The
+        output file is named according  to the predefined file naming convention
+        and the appropriate lightcurve data is processed  using the
         `cutterlib.repack_lightcurve_band_filetype` function.
 
         Parameters:
@@ -904,10 +708,16 @@ class g3detect:
              `repack_lightcurve_band_filetype` function from `cutterlib`
              to write the FITS files.
         """
-        for BAND in self.files.keys():
-            FILETYPE = 'None'
-            ar = (self.lightcurve, BAND, FILETYPE, self.config)
-            cutterlib.repack_lightcurve_band_filetype(*ar)
+        for band in self.obs_dict.keys():
+            file_type = 'None'
+            cutterlib.repack_lightcurve_band_filetype(
+                self.lightcurve,
+                self.id_names,
+                self.obs_dict,
+                band,
+                file_type,
+                self.config,
+            )
 
     def repack_stamps(self):
         """
@@ -970,6 +780,154 @@ class g3detect:
         self.logger.info(msg)
 
 
+def get_fits_map(filename):
+    """Read data and metadata from a FITS file of a map.
+
+    Reads the header from the SCI HDU. For FITS files without EXTNAME, the SCI
+    and WGT HDUs are assumed to be the first and second headers containing data
+    respectively.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the FITS file.
+
+    Returns
+    -------
+    header : fitsio.header.FITSHDR
+    hdus : dict
+        A dictionary containing map data. The keys are:
+        - "flux" : ndarray
+        - "wgt" : ndarray
+        - "mask" : ndarray
+    """
+    header_map, hdunum = cutterlib.get_headers_hdus(filename)
+    sci_ind = hdunum['SCI']
+    wgt_ind = hdunum['WGT']
+
+    with fitsio.FITS(filename, "r") as fits:
+        header = header_map['SCI']
+        flux = fits[sci_ind].read()
+        wgt = fits[wgt_ind].read()
+        # Mask is True for pixels with no data.
+        mask = wgt == 0
+        return header, {"flux": flux, "wgt": wgt, "mask": mask}
+
+
+def detect_sources_in_file(filename, config):
+    """Catalog the source detections within a FITS file of a map.
+
+    If the file's band is not in `config.detect_bands`, the file is skipped
+    and (None, None) is returned.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the file for detection.
+    config : types.SimpleNamespace
+        Configuration for processing files in the same format as configuration
+        for `g3detect`.
+
+    Returns
+    -------
+    catalog : astropy.table.Table or `None`
+        A catalog of sources properties with each source in a row or `None` if
+        no sources were found.
+    """
+    filetype = g3_or_fits(filename)
+    if filetype  != "FITS":
+        raise ValueError(
+            f"Invalid file extension at {filename}. "
+            "Only FITS files are currently supported."
+        )
+    LOGGER.info(f"This file: {filename} is {filetype} file")
+    header, hdus = get_fits_map(filename)
+    obsid = header["OBSID"]
+    band = header["BAND"]
+    if band in config.detect_bands:
+        LOGGER.info((f"Running detection for {obsid}_{band}"))
+        flux = hdus["flux"]
+        wgt = hdus["wgt"]
+        mask = hdus["mask"]
+        wcs = WCS(header)
+        plot_name = os.path.join(config.outdir, f"{obsid}_{band}_cat")
+        plot_title = header["BAND"]
+        field = header["FIELD"]
+        segm_p, cat_p = detect_with_photutils(
+            flux,
+            wgt=wgt,
+            mask=mask,
+            nsigma_thresh=config.nsigma_thresh,
+            npixels=config.npixels, wcs=wcs,
+            rms2D=config.rms2D,
+            rms2Dimage=config.rms2D_image,
+            box=config.rms2D_box,
+            plot=config.plot,
+            plot_name=plot_name, plot_title=plot_title
+        )
+
+        if config.detect_negative:
+            segm_n, cat_n = detect_with_photutils(
+                -flux,
+                wgt=wgt,
+                mask=mask,
+                nsigma_thresh=config.nsigma_thresh,
+                npixels=config.npixels, wcs=wcs,
+                rms2D=config.rms2D,
+                box=config.rms2D_box,
+            )
+            if cat_n is not None:
+                cat_n['snr_max'] *= -1
+            cats = [c for c in [cat_p, cat_n] if c is not None]
+            cat = vstack(cats) if len(cats) > 0 else None
+        else:
+            cat = cat_p
+
+        if cat is not None:
+            # Remove objects that match the sources catalog for that field.
+            if config.no_remove_source == False:
+                cat = remove_objects_near_sources(
+                    cat, field, config.point_source_file
+                )
+
+            # Filter sources with ellipticity greater than or equal to the cut.
+            remove_mask = (
+                (cat["ellipticity"] >= config.ell_cut) |
+                np.isnan(cat["ellipticity"])
+            )
+            LOGGER.info(
+                f"Removing {np.count_nonzero(remove_mask)} source(s) "
+                f"with ellipticity >= {config.ell_cut}"
+            )
+            LOGGER.debug("Will remove:")
+            if LOGGER.getEffectiveLevel() == logging.DEBUG:
+                print(cat[PPRINT_KEYS][remove_mask])
+            cat = cat[~remove_mask]
+        if cat is None or len(cat) == 0:
+            # Either no sources were detected or they were all filtered.
+            LOGGER.info(f"Will not include catalog for {obsid}_{band}")
+            return None
+        else:
+            cat.meta["band"] = band
+            cat.meta["obsID"] = obsid
+            cat.meta["field"] = field
+            LOGGER.info(f"Adding obs/obs_max/band column for {band}:{obsid}")
+            cat.add_column(obsid, name="obs", index=0)
+            cat.add_column(f"{obsid}_{band}", name="obs_max", index=0)
+            cat.add_column(band, name="band", index=0)
+            if config.write_obscat:
+                catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
+                cat.write(catname, overwrite=True, format="ascii.ecsv")
+                LOGGER.info(f"Wrote catalog to: {catname}")
+            return cat
+    else:
+        LOGGER.info(
+            f"Will not run detection for {obsid}_{band} -- "
+            "not in detection bands"
+        )
+        return None
+
+
 def check_index_ncoords_columns(catalog):
     # Make sure that index is present as a column
     if 'index' not in catalog.colnames:
@@ -983,21 +941,18 @@ def check_index_ncoords_columns(catalog):
 
 
 def remove_non_repeat_sources(catalog, ncoords=1):
-    # Remove entries from catalog with ncoords <= nr
+    # Remove entries from catalog with less than ncoords detections
     if ncoords > 1:
-        inds = np.where(catalog['ncoords'] >= ncoords)[0]
-        catsize = len(catalog)
-        nk = len(inds)  # N keep
-        nr = catsize - nk  # N remove
-        if nr > 0:
-            LOGGER.info(f"Removing {nr} sources with ncoords < {ncoords}")
-            cutcat = catalog[inds]
-        else:
-            cutcat = catalog
+        remove_mask = catalog["ncoords"] < ncoords
+        remove_count = np.count_nonzero(remove_mask)
+        if remove_count > 0:
+            LOGGER.info(
+                f"Removing {remove_count} sources with ncoords < {ncoords}"
+            )
+        return catalog[~remove_mask]
     else:
         LOGGER.warning(f"Will not remove non-repeats ncoords <= 1: ncoords: {ncoords}")
-        cutcat = catalog
-    return cutcat
+        return catalog
 
 
 def concatenate_fits(input_files, output_file, id, band, position, snr_max):
@@ -1191,37 +1146,12 @@ def elapsed_time(t1, verb=False):
     return stime
 
 
-def get_NP(MP):
-    """
-    Returns the number of processors to use.
-    If `MP` is 0, uses all available processors on the machine.
-
-    Parameters:
-    - MP (int): The number of processors to use. If 0, all available processors are used.
-
-    Returns:
-    - int: The number of processors (NP).
-
-    Raises:
-    ValueError: If `MP` is not an integer.
-    """
-    # For it to be a integer
-    MP = int(MP)
-    if MP == 0:
-        NP = int(mp.cpu_count())
-    elif isinstance(MP, int):
-        NP = MP
-    else:
-        raise ValueError('MP is wrong type: %s, integer type' % MP)
-    return NP
-
-
 def create_dir(dirname):
     """
     Safely attempts to create a directory.
 
     If the directory does not exist, it is created with permissions `0o755`. If there is an
-    error during directory creation, a warning is logged.
+    error during directory creation, an exception is raised.
 
     Parameters:
     - dirname (str): The path to the directory to create.
@@ -1229,33 +1159,8 @@ def create_dir(dirname):
     Returns:
      None
     """
-    if not os.path.isdir(dirname):
-        LOGGER.info(f"Creating directory: {dirname}")
-        try:
-            os.makedirs(dirname, mode=0o755, exist_ok=True)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                LOGGER.warning(f"Problem creating {dirname} -- proceeding with trepidation")
-
-
-def chunker(seq, size):
-    """
-    Splits a sequence into chunks of a specified size.
-
-    Yields chunks of the sequence, each with the specified size.
-
-    Parameters:
-    - seq (iterable): The sequence to chunk (e.g., list, tuple, etc.).
-    - size (int): The size of each chunk.
-
-    Returns:
-    - generator: A generator yielding chunks of the sequence.
-
-    Example:
-    >>> list(chunker([1, 2, 3, 4, 5], 2))
-    [[1, 2], [3, 4], [5]]
-    """
-    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
+    LOGGER.info(f"Creating directory: {dirname}")
+    os.makedirs(dirname, mode=0o755, exist_ok=True)
 
 
 def find_dual_detections(t1, t2, separation=20, plot=False):
@@ -1505,10 +1410,6 @@ def find_unique_centroids(table_centroids, separation=20, plot=False):
             ncoords = [len(x) for x in xx_pix]
         tblidx = np.arange(len(xc_sky)) + 1
 
-        # Before Update
-        logger.debug("Before Update")
-        logger.debug(f"\n{stacked_centroids}\n")
-
         # Update centroids with averages
         # Create a Skycoord object
         coords = SkyCoord(xc_sky, yc_sky, frame=FK5, unit='deg')
@@ -1530,10 +1431,6 @@ def find_unique_centroids(table_centroids, separation=20, plot=False):
         stacked_centroids['snr_max'].info.format = '.2f'
         stacked_centroids.add_index('index')
         logger.debug(f"centroids Done for {label1}")
-        logger.debug("After Update [find_unique_centroids]")
-        logger.debug("#### stacked_centroids ####")
-        logger.debug(f"\n{stacked_centroids}")
-        logger.debug("#### ---------  ####\n")
 
     return stacked_centroids
 
@@ -1854,27 +1751,29 @@ def compute_rms2D(data, mask=None, box=200, filter_size=(3, 3), sigmaclip=None):
     - If a mask is provided, the data is masked by replacing the masked areas with `NaN`,
       which prevents them from affecting the background estimation.
     """
-    # in case we want to clip values
-    if sigmaclip:
-        sigma_clip = SigmaClip(sigma=sigmaclip)
-    else:
-        sigma_clip = None
 
-    # Set up the background estimator
-    bkg_estimator = photutils.background.StdBackgroundRMS(sigma_clip)
-    # Masking does not work, as images have a large section that it's empty, instead we trick it
-    # by masking the input data with Nans
-    if mask is not None:
-        data = np.where(mask, data, np.nan)
-    bkg = photutils.background.Background2D(data, box, mask=None, filter_size=filter_size,
-                                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+    # Create a SigmaClip object for sigma clipping if necessary.
+    sigma_clip = SigmaClip(sigma=sigmaclip) if sigmaclip is not None else None
+
+    # Sigma clipping is already built into the Background2D object, so it is
+    # not needed for the estimator.
+    bkgrms_estimator = photutils.background.StdBackgroundRMS()
+
+    bkg = photutils.background.Background2D(
+        data,
+        box,
+        mask=mask,
+        filter_size=filter_size,
+        sigma_clip=sigma_clip,
+        bkgrms_estimator=bkgrms_estimator,
+    )
     return bkg
-
 
 def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=20,
                           rms2D=False, rms2Dimage=False, box=(200, 200),
                           filter_size=(3, 3), sigmaclip=None, wcs=None,
-                          plot=False, plot_title=None, plot_name=None):
+                          plot=False, plot_title=None, plot_name=None
+):
     """
     Use photutils SourceFinder and SourceCatalog to create a catalog of sources.
 
@@ -1916,25 +1815,17 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
     """
     t0 = time.time()
     if mask is not None:
-        # Select only the indices with flux
-        idx = np.where(mask == 1)
-        # Create a bool mask for the maked array, False is NOT masked
-        LOGGER.info("Selecting indices for boolean mask")
-        gmask = np.where(mask == 1, False, True)
         # Make the data array a masked array (better plots)
-        data = ma.masked_array(data, gmask)
+        data = ma.masked_array(data, mask)
+        mean, sigma = norm.fit(data[~mask])
     else:
-        idx = np.where(mask)
-        gmask = None
-    # Get the mean and std of the distribution
-    mean, sigma = norm.fit(data[idx].flatten())
+        mean, sigma = norm.fit(data)
 
     # Define the threshold, array in the case of rms2D
     if rms2D:
         t0 = time.time()
         bkg = compute_rms2D(data, mask=mask, box=box, filter_size=filter_size, sigmaclip=sigmaclip)
-        sigma2D = np.where(mask, bkg.background, np.nan)
-        # sigma2D = bkg.background
+        sigma2D = bkg.background_rms if mask is None else np.where(mask, np.nan, bkg.background_rms)
         threshold = nsigma_thresh * sigma2D
         LOGGER.debug(f"2D RMS computed in {elapsed_time(t0)}")
         # Dump 2D rms image into a fits file
@@ -1948,8 +1839,8 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
             LOGGER.info(f"2D RMS FITS image: {fitsname}")
         if plot:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 9))
-            plot_distribution(ax1, data[idx], mean, sigma, nsigma=nsigma_thresh)
-            plot_rms2D(bkg.background, ax2, gmask=gmask)
+            plot_distribution(ax1, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
+            plot_rms2D(bkg.background, ax2, mask=mask)
             plt.savefig(f"{plot_name}_bkg.pdf")
             LOGGER.info(f"Created: {plot_name}_bkg.pdf")
     else:
@@ -1957,12 +1848,12 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
 
     # Perform segmentation and deblending
     finder = SourceFinder(npixels=npixels, nlevels=32, contrast=0.001, progress_bar=False)
-    segm = finder(data, threshold)
+    segm = finder(data, threshold, mask=mask)
     # We stop if we don't find source
     if segm is None:
         LOGGER.info("No sources found in astropy/segm, returning (None, None)")
         return None, None
-    cat = SourceCatalog(data, segm, error=wgt, wcs=wcs, progress_bar=True)
+    cat = SourceCatalog(data, segm, error=wgt, mask=mask, wcs=wcs, progress_bar=True)
     # Make sure these are added.
     cat.default_columns.append('elongation')
     cat.default_columns.append('ellipticity')
@@ -1991,11 +1882,11 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
         else:
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
         plot_detection(ax1, data, cat, sigma, nsigma_plot=5, plot_title=plot_title)
-        plot_segmentation(ax2, segm, cat, gmask=gmask)
-        plot_distribution(ax3, data[idx], mean, sigma, nsigma=nsigma_thresh)
+        plot_segmentation(ax2, segm, cat, mask=mask)
+        plot_distribution(ax3, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
         if rms2D:
             # Make the background image a masked arrays
-            plot_rms2D(bkg.background, ax4, gmask=gmask)
+            plot_rms2D(bkg.background, ax4, mask=mask)
         if plot_name:
             plt.savefig(f"{plot_name}.pdf")
             LOGGER.info(f"Saved: {plot_name}.pdf")
@@ -2043,7 +1934,7 @@ def g3_or_fits(filename):
         raise ValueError(msg)
 
 
-def plot_rms2D(bkg, ax, gmask=None, nsigma_plot=3.5):
+def plot_rms2D(bkg, ax, mask=None, nsigma_plot=3.5):
     """
     Plot the 2D noise map (RMS) with optional masking.
 
@@ -2054,15 +1945,15 @@ def plot_rms2D(bkg, ax, gmask=None, nsigma_plot=3.5):
     Args:
         bkg (numpy.ndarray): The 2D background noise data (RMS) to be displayed.
         ax (matplotlib.axes.Axes): The axes on which to plot the data.
-        gmask (numpy.ndarray, optional): A boolean mask array to hide certain regions in the plot. Default is None.
+        mask (numpy.ndarray, optional): A boolean mask array to hide certain regions in the plot. Default is None.
         nsigma_plot (float, optional): The number of standard deviations for color scaling. Default is 3.5.
 
     Example:
         >>> plot_rms2D(bkg, ax)
     """
-    # Plot a masked array if gmask is passed
-    if gmask is not None:
-        bkg = ma.masked_array(bkg, gmask)
+    # Plot a masked array if mask is passed
+    if mask is not None:
+        bkg = ma.masked_array(bkg, mask)
     im = ax.imshow(bkg, origin='lower', cmap='Greys')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
@@ -2102,7 +1993,7 @@ def plot_detection(ax1, data, cat, sigma, nsigma_plot=5, plot_title=None):
     cat.plot_kron_apertures(ax=ax1, color='white', lw=0.5)
 
 
-def plot_segmentation(ax2, segm, cat, gmask=None):
+def plot_segmentation(ax2, segm, cat, mask=None):
     """
     Plot a segmentation image with overlaid catalog apertures.
 
@@ -2114,14 +2005,14 @@ def plot_segmentation(ax2, segm, cat, gmask=None):
         ax2 (matplotlib.axes.Axes): The axes on which to plot the segmentation image.
         segm (numpy.ndarray): The segmentation image (2D array).
         cat (astropy.table.Table): The catalog containing object information, used to overlay apertures.
-        gmask (numpy.ndarray, optional): A boolean mask to hide certain segments in the plot. Default is None.
+        mask (numpy.ndarray, optional): A boolean mask to hide certain segments in the plot. Default is None.
 
     Example:
         >>> plot_segmentation(ax2, segm, cat)
     """
-    # Plot a masked array if gmask is passed
-    if gmask is not None:
-        segm_plot = ma.masked_array(segm, gmask)
+    # Plot a masked array if mask is passed
+    if mask is not None:
+        segm_plot = ma.masked_array(segm, mask)
     else:
         segm_plot = segm
     im = ax2.imshow(segm_plot, origin='lower', cmap=segm.cmap,
@@ -2217,7 +2108,7 @@ def get_sources_catalog(field, point_source_file=None):
     # Get the catalog with masked sources
     if point_source_file is None:
         point_source_file = sources.get_field_source_list(field, analysis="lightcurve")
-    _, psra, psdec, __ = sources.read_point_source_mask_file(point_source_file)
+    _, psra, psdec, _ = sources.read_point_source_mask_file(point_source_file)
     LOGGER.debug(f"Loading source mask positions from file: {point_source_file}")
     # Create a SkyCoord object with the sources catalog to make the matching
     # psra and psdec are in G3 units and need to be converted back to degrees to be use in astropy
@@ -2256,17 +2147,17 @@ def remove_objects_near_sources(cat, field, point_source_file=None, max_dist=5*u
         return cat
 
     # Extract the SkyCoord object
-    cat1 = cat['sky_centroid']
-    inds1, inds2, dist, _ = search_around_sky(cat1, pscat, max_dist)
-    if len(inds1) > 0:
-        LOGGER.info(f"Found {len(inds1)} matches, will remove them from catalog")
+    ind_cat, ind_ps, dist, _ = search_around_sky(cat['sky_centroid'], pscat, max_dist)
+    remove_mask = np.zeros(len(cat), dtype=bool)
+    remove_mask[ind_cat] = True
+    if len(ind_cat) > 0:
+        LOGGER.info(f"Found {len(ind_cat)} matches, will remove them from catalog")
         LOGGER.debug("Will remove: ")
         if LOGGER.getEffectiveLevel() == logging.DEBUG:
-            print(cat[PPRINT_KEYS][inds1])
-        cat = cat[~np.isin(np.arange(cat1.size), inds1)]
+            print(cat[remove_mask][PPRINT_KEYS])
     else:
         LOGGER.info("No matches found in sources catalog")
-    return cat
+    return cat[~remove_mask]
 
 
 def compute_snr(catalog, sigma, key='max_value'):
