@@ -940,21 +940,18 @@ def check_index_ncoords_columns(catalog):
 
 
 def remove_non_repeat_sources(catalog, ncoords=1):
-    # Remove entries from catalog with ncoords <= nr
+    # Remove entries from catalog with less than ncoords detections
     if ncoords > 1:
-        inds = np.where(catalog['ncoords'] >= ncoords)[0]
-        catsize = len(catalog)
-        nk = len(inds)  # N keep
-        nr = catsize - nk  # N remove
-        if nr > 0:
-            LOGGER.info(f"Removing {nr} sources with ncoords < {ncoords}")
-            cutcat = catalog[inds]
-        else:
-            cutcat = catalog
+        remove_mask = catalog["ncoords"] < ncoords
+        remove_count = np.count_nonzero(remove_mask)
+        if remove_count > 0:
+            LOGGER.info(
+                f"Removing {remove_count} sources with ncoords < {ncoords}"
+            )
+        return catalog[~remove_mask]
     else:
         LOGGER.warning(f"Will not remove non-repeats ncoords <= 1: ncoords: {ncoords}")
-        cutcat = catalog
-    return cutcat
+        return catalog
 
 
 def concatenate_fits(input_files, output_file, id, band, position, snr_max):
