@@ -1,6 +1,5 @@
 from concurrent.futures import ProcessPoolExecutor
 import copy
-import errno
 import importlib.metadata
 import logging
 from logging.handlers import RotatingFileHandler
@@ -87,7 +86,7 @@ class g3detect:
         self.logger = LOGGER
         self.setup_logging()
 
-        create_dir(self.config.outdir)
+        os.makedirs(self.config.outdir, mode=0o755, exist_ok=True)
 
         # Check input files vs file list
         self.check_input_files()
@@ -1154,7 +1153,7 @@ def create_dir(dirname):
     Safely attempts to create a directory.
 
     If the directory does not exist, it is created with permissions `0o755`. If there is an
-    error during directory creation, a warning is logged.
+    error during directory creation, an exception is raised.
 
     Parameters:
     - dirname (str): The path to the directory to create.
@@ -1162,13 +1161,8 @@ def create_dir(dirname):
     Returns:
      None
     """
-    if not os.path.isdir(dirname):
-        LOGGER.info(f"Creating directory: {dirname}")
-        try:
-            os.makedirs(dirname, mode=0o755, exist_ok=True)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                LOGGER.warning(f"Problem creating {dirname} -- proceeding with trepidation")
+    LOGGER.info(f"Creating directory: {dirname}")
+    os.makedirs(dirname, mode=0o755, exist_ok=True)
 
 
 def find_dual_detections(t1, t2, separation=20, plot=False):
