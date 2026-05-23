@@ -784,11 +784,6 @@ def get_mean_date(date1, date2):
     mean_date: str
         The mean between the two dates in an ISOT format string.
     """
-    if "yearly" in date1:
-        # Add a warning for getting yearly map.
-        # This should not be in the light curve.
-        LOGGER.debug(f"Ran into yearly  map: {date1}")
-        return date1
     d1 = Time(date1, format="isot")
     d2 = Time(date2, format="isot")
     date_mean = d1 + (d2 - d1) / 2
@@ -846,9 +841,6 @@ def repack_lightcurve_band_filetype(lightcurve, id_names, obs_dict, BAND, FILETY
             DATE_BEG = lightcurve[obs]['DATE-BEG']
             DATE_END = lightcurve[obs]['DATE-END']
             DATE_AVE = get_mean_date(DATE_BEG, DATE_END)
-            if DATE_AVE.find('yearly') != -1:
-                LOGGER.debug(f"Ignoring {objID} for {obs} -- yearly map")
-                continue
 
             # Get the index for objID
             idx = lightcurve[obs]['objID'].index(objID)
