@@ -86,7 +86,7 @@ class g3detect:
         self.logger = LOGGER
         self.setup_logging()
 
-        os.makedirs(self.config.outdir, mode=0o755, exist_ok=True)
+        create_dir(self.config.outdir)
 
         # Check input files vs file list
         self.check_input_files()
@@ -1159,8 +1159,16 @@ def create_dir(dirname):
     Returns:
      None
     """
-    LOGGER.info(f"Creating directory: {dirname}")
-    os.makedirs(dirname, mode=0o755, exist_ok=True)
+    try:
+        # Try to create a directory and raise an error if it already exists.
+        # This is necessary to determine whether the directory existed before
+        # because a separate thread may create the directory in the time between
+        # checking and creating the directory.
+        os.makedirs(dirname, mode=0o755, exist_ok=False)
+        LOGGER.info(f"Created directory: {dirname}")
+    except FileExistsError:
+        # Do nothing if the directory already exists.
+        pass
 
 
 def find_dual_detections(t1, t2, separation=20, plot=False):
