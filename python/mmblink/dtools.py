@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor
 import copy
+from dataclasses import dataclass
 import importlib.metadata
 import logging
 from logging.handlers import RotatingFileHandler
@@ -41,6 +42,37 @@ LOGGER.propagate = False
 PPRINT_KEYS = ['label', 'xcentroid', 'ycentroid', 'sky_centroid', 'sky_centroid_dms',
                'max_value', 'snr_max', 'ellipticity', 'area']
 
+@dataclass(frozen=True)
+class ColumnDescription:
+    name : str
+    photutils : bool
+
+CATALOG_COLUMNS = [
+    ColumnDescription("obs_max", False),
+    ColumnDescription("snr_max", False),
+    ColumnDescription("label", True),
+    ColumnDescription("sky_centroid", True),
+    ColumnDescription("xcentroid", True),
+    ColumnDescription("ycentroid", True),
+    ColumnDescription("bbox_xmin", True),
+    ColumnDescription("bbox_xmax", True),
+    ColumnDescription("bbox_ymin", True),
+    ColumnDescription("bbox_ymax", True),
+    ColumnDescription("area", True),
+    ColumnDescription("semimajor_sigma", True),
+    ColumnDescription("semiminor_sigma", True),
+    ColumnDescription("orientation", True),
+    ColumnDescription("eccentricity", True),
+    ColumnDescription("min_value", True),
+    ColumnDescription("max_value", True),
+    ColumnDescription("segment_flux", True),
+    ColumnDescription("segment_fluxerr", True),
+    ColumnDescription("kron_flux", True),
+    ColumnDescription("kron_fluxerr", True),
+    ColumnDescription("elongation", True),
+    ColumnDescription("ellipticity", True),
+    ColumnDescription("sky_centroid_dms", False),
+]
 
 # Set matplotlib logger at warning level to disengable from default logger
 plt.set_loglevel(level='warning')
@@ -683,7 +715,7 @@ class g3detect:
     def write_centroids(self, catalog, band=None):
 
         # Make a copy of the catalog, so that changes are not propagated
-        CAT_KEYS = ['index', 'id', 'band', 'label', 'obs_max',
+        CAT_KEYS = ['index', 'id', 'label', 'obs_max',
                     'xcentroid', 'ycentroid',
                     'sky_centroid', 'sky_centroid_dms',
                     'max_value', 'snr_max', 'ellipticity', 'area', 'ncoords']
@@ -838,9 +870,7 @@ def detect_sources_in_file(filename, config):
             cat.meta["obsID"] = obsid
             cat.meta["field"] = field
             LOGGER.info(f"Adding obs/obs_max/band column for {band}:{obsid}")
-            cat.add_column(obsid, name="obs", index=0)
             cat.add_column(f"{obsid}_{band}", name="obs_max", index=0)
-            cat.add_column(band, name="band", index=0)
             if config.write_obscat:
                 catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
                 cat.write(catname, overwrite=True, format="ascii.ecsv")
@@ -1181,7 +1211,7 @@ def find_dual_detections(t1, t2, separation=20, plot=False):
 
     # Get the ids with max value
     value_max = np.array([t1[idxcat1]['max_value'], t2[idxcat2]['max_value']])
-    obs_value = np.array([t1[idxcat1]['obs'], t2[idxcat2]['obs']])
+    obs_value = np.array([t1[idxcat1]['obs_max'], t2[idxcat2]['obs_max']])
     max_value_max = value_max.max(axis=0)
     idmax = value_max.argmax(axis=0)
     obs_max = obs_value.T[0][idmax]
@@ -1191,7 +1221,7 @@ def find_dual_detections(t1, t2, separation=20, plot=False):
     # Before Update
     logger.debug("Before Update")
     t = stacked_centroids['label', 'xcentroid', 'ycentroid', 'sky_centroid_dms',
-                          'obs', 'obs_max', 'max_value',
+                          'obs_max', 'max_value',
                           'eccentricity', 'elongation', 'ellipticity', 'area']
     logger.debug(f"\n{t}\n")
     # Update centroids with averages
@@ -1217,7 +1247,7 @@ def find_dual_detections(t1, t2, separation=20, plot=False):
     logger.debug("After Update[find_dual_detections]")
     logger.debug("#### stacked_centroids ####")
     t = stacked_centroids['label', 'xcentroid', 'ycentroid', 'sky_centroid_dms',
-                          'obs', 'obs_max', 'max_value', 'ncoords',
+                          'obs_max', 'max_value', 'ncoords',
                           'eccentricity', 'elongation', 'ellipticity', 'area']
     logger.debug(f"\n{t}")
     logger.debug("#### ---- ###")
@@ -1274,12 +1304,6 @@ def find_unique_centroids(table_centroids, separation=20, plot=False):
             cat1 = t1['sky_centroid']
         t2 = copy.deepcopy(table_centroids[label2])
         cat2 = t2['sky_centroid']
-
-        # Remove 'obs' from tables if present
-        if 'obs' in t1.columns:
-            t1.remove_column('obs')
-        if 'obs' in t2.columns:
-            t2.remove_column('obs')
 
         # Find matching objects to avoid duplicates
         idxcat1, idxcat2, d2d, _ = cat2.search_around_sky(cat1, max_sep)
@@ -1437,7 +1461,7 @@ def find_repeating_sources(cat, separation=20, plot=False, outdir=None):
 
         # Get the ids with max value
         max_value = np.array([cat[scan1][idxcat1]['max_value'], cat[scan2][idxcat2]['max_value']])
-        obs_value = np.array([cat[scan1][idxcat1]['obs'], cat[scan2][idxcat2]['obs']])
+        obs_value = np.array([cat[scan1][idxcat1]['obs_max'], cat[scan2][idxcat2]['obs_max']])
         max_value_max = max_value.max(axis=0)
         idmax = max_value.argmax(axis=0)
         obs_max = obs_value.T[0][idmax]
@@ -1788,15 +1812,12 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
         LOGGER.info("No sources found in astropy/segm, returning (None, None)")
         return None, None
     cat = SourceCatalog(data, segm, error=wgt, mask=mask, wcs=wcs, progress_bar=True)
-    # Make sure these are added.
-    cat.default_columns.append('elongation')
-    cat.default_columns.append('ellipticity')
 
     LOGGER.info(f"detect_with_photutils runtime: {elapsed_time(t0)}")
     LOGGER.info(f"Found: {len(cat)} objects")
 
     # Nicer formatting
-    tbl = cat.to_table()
+    tbl = cat.to_table([col.name for col in CATALOG_COLUMNS if col.photutils])
     tbl['xcentroid'].info.format = '.2f'  # optional format
     tbl['ycentroid'].info.format = '.2f'
     tbl['max_value'].info.format = '.2f'
