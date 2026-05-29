@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-import mmblink.dtools as du
 import argparse
 import time
 
+import mmblink.dtools as du
 
 def cmdline():
     """
@@ -16,9 +16,6 @@ def cmdline():
                         help="Filename(s) to ingest")
     parser.add_argument("--outdir", type=str, action='store', default=None,
                         required=True, help="Location for output files")
-    parser.add_argument("--clobber", action='store_true', default=False,
-                        help="Clobber output files")
-
     parser.add_argument("--field", type=str, action='store', default=None,
                         help="Field name (i.e. SourceName) for automatically determining point source file to use.")
     parser.add_argument("--no_remove_source", action='store_true', default=False,
@@ -31,7 +28,8 @@ def cmdline():
     parser.add_argument("--detect_negative", action = 'store_true', default = False,
                         help="Also detect negative soruces")
     parser.add_argument("--write_obscat", action='store_true', default=False,
-                        help="Write out the catalogs for each obsID/band")
+                        help="Write out the full catalogs for each map with all metadata and columns.",
+    )
     parser.add_argument("--stamp_size", type=float, action='store', default=10,
                         help="Size (in arcmin) of the stamps to be cut [default:10 arcmin]")
     parser.add_argument("--prefix", type=str, action='store', default="SPT3G",
@@ -67,11 +65,11 @@ def cmdline():
                         help="N-repeat, number of times source repeats [default=1]")
     parser.add_argument("--point_source_file", action='store', default=None,
                         help="User provided point source file to use for masking [default=None]")
-    # Use multiprocessing
     parser.add_argument("--np", action="store", default=1, type=int,
                         help="Run using multi-process, 0=automatic, 1=single-process [default]")
-    parser.add_argument("--ntheads", action="store", default=1, type=int,
-                        help="The number of threads used by numexpr 0=automatic, 1=single [default]")
+    parser.add_argument("--detect_cat", required=False, nargs="+",
+        help="Read given detection catalogs instead of performing detection."
+    )
 
     args = parser.parse_args()
     # Sort the bands
@@ -94,10 +92,12 @@ if __name__ == "__main__":
     args = cmdline()
     # Initialize detection worker with parsed arguments
     g3d = du.g3detect(**args.__dict__)
-    # Run the detection on all input files that match detection bands
-    g3d.run_detection_files()
 
-    # Source matching
+    if args.detect_cat is not None:
+        g3d.load_detection_files()
+    else:
+        g3d.detect_all_sources()
+
     if args.dual_detection:
         # Dual matching, source should be detected in both bands per OBSID
         g3d.collect_dual()

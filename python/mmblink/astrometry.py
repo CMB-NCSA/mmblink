@@ -15,8 +15,8 @@ The functions will:
  This version was forked from spt3g_cutter (Feb 2025).
  rev: a80830503cd5fda0148a9cc5b0621b6372df8f72
 """
-
 import math
+
 import numpy
 
 
