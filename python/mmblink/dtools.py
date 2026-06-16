@@ -463,6 +463,7 @@ class g3detect:
         This function is named collect_dual for legacy purposes. It is capable of
         handling any number of bands.
         """
+        self.logger.info("Collecting sources detected in each observation.")
         # Sort catalogs by obsID then band so that sources within each
         # observation can be matched by band. Then, the sources from each
         # observation detected in multiple bands are matched to a final catalog.
@@ -484,6 +485,7 @@ class g3detect:
             )) for obsid, catalogs in obs_groups
         ]
 
+        self.logger.info("Filtering sources not detected in multiple bands.")
         # Filter to only contain sources detected in multiple bands.
         group_catalogs = [
             (obsid, catalog[catalog["ncoords"] > 1]) for obsid, catalog
@@ -495,12 +497,15 @@ class g3detect:
             if len(catalog) > 0
         ]
 
+        self.logger.info(
+            "Collecting sources detected in multiple bands per observation."
+        )
         # Match sources across observations.
         stacked = find_unique_centroids(
             [catalog for _, catalog in group_catalogs],
             max_separation=self.config.max_sep,
         )
-        stacked = stacked[stacked["ncoords"] >= self.config.nr]
+        stacked = remove_non_repeat_sources(stacked, self.config.nr)
         self.add_catalog_id(stacked)
         self.stacked_centroids = stacked
         self.write_centroids(stacked)
@@ -515,6 +520,7 @@ class g3detect:
         # band can be matched. Then, the sources from each band are matched to
         # a final catalog. Band order is determined by the order of
         # detect_bands.
+        self.logger.info("Collecting sources detected in each band.")
         sorted_catalogs = sorted(
             self.detect_catalogs,
             key=lambda x: (
@@ -535,12 +541,14 @@ class g3detect:
         ]
         for band_index, catalog in group_catalogs:
             catalog.meta["band"] = self.config.detect_bands[band_index]
+
         # Match sources across bands.
+        self.logger.info("Collecting sources across bands.")
         stacked = find_unique_centroids(
             [catalog for _, catalog in group_catalogs],
             max_separation=self.config.max_sep,
         )
-        stacked = stacked[stacked["ncoords"] >= self.config.nr]
+        stacked = remove_non_repeat_sources(stacked, self.config.nr)
         self.add_catalog_id(stacked)
         self.stacked_centroids = stacked
         # Write all stacked centroids and stacked centroids per band.
@@ -887,18 +895,6 @@ def detect_sources_in_file(filename, config):
             "not in detection bands"
         )
         return None
-
-
-def check_index_ncoords_columns(catalog):
-    # Make sure that index is present as a column
-    if 'index' not in catalog.colnames:
-        tblidx = np.arange(len(catalog)) + 1
-        catalog.add_column(tblidx, name='index', index=0)
-    if 'ncoords' not in catalog.columns:
-        ncoords = np.ones(len(catalog), dtype='int')
-        catalog.add_column(ncoords, name='ncoords')
-
-    return catalog
 
 
 def remove_non_repeat_sources(catalog, ncoords=1):
