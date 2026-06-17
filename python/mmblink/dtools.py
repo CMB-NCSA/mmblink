@@ -882,8 +882,14 @@ def detect_sources_in_file(filename, config):
             cat.meta["band"] = band
             cat.meta["obsID"] = obsid
             cat.meta["field"] = field
-            LOGGER.info(f"Adding obs/obs_max/band column for {band}:{obsid}")
+            LOGGER.info(f"Adding obs_max/ncoords column for {band}:{obsid}")
             cat.add_column(f"{obsid}_{band}", name="obs_max", index=0)
+            cat["ncoords"] = np.ones(len(cat), dtype=np.int64)
+
+            # We must make sure we have included all the necessary columns.
+            for column in CATALOG_COLUMNS:
+                assert column.name in cat.colnames
+
             if config.write_obscat:
                 catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
                 cat.write(catname, overwrite=True, format="ascii.ecsv")
@@ -1159,7 +1165,7 @@ def find_unique_centroids(catalogs, *, max_separation):
     unique = QTable()
     # The index is 1-based.
     unique["index"] = np.arange(full_length, dtype=np.int64) + 1
-    unique["ncoords"] = np.ones(full_length, dtype=np.int64)
+    unique["ncoords"] = np.full(full_length, -1, dtype=np.int64)
     unique["sky_centroid"] = SkyCoord(
         np.zeros(full_length) * u.deg, np.zeros(full_length) * u.deg, frame=FK5,
     )
@@ -1201,9 +1207,6 @@ def find_unique_centroids(catalogs, *, max_separation):
         # Update matches in sources.
         source_id[current_match] = unique["index"][previous_match]
 
-        unique["ncoords"][previous_match] += 1
-        ncoords = unique["ncoords"][previous_match]
-
         # Convert coordinates to cartesian for finding the mean.
         # Assume that coordinates are in the same frame.
         previous_coord = unique["sky_centroid"][previous_match].cartesian
@@ -1211,7 +1214,13 @@ def find_unique_centroids(catalogs, *, max_separation):
         # Find the weighted mean based on the number of detected coordinates so
         # that all coordinates are weighted equally.
         mean_coord = SkyCoord(
-            (current_coord - previous_coord) / ncoords + previous_coord,
+            (
+                current_coord * catalog["ncoords"][current_match] +
+                previous_coord * unique["ncoords"][previous_match]
+            ) / (
+                catalog["ncoords"][current_match] +
+                unique["ncoords"][previous_match]
+            ),
             frame=FK5,
         )
         # Ignore the distance of the coordinates since they were projected onto
@@ -1219,6 +1228,7 @@ def find_unique_centroids(catalogs, *, max_separation):
         unique["sky_centroid"][previous_match] = SkyCoord(
             mean_coord.ra, mean_coord.dec, frame=FK5
         )
+        unique["ncoords"][previous_match] += catalog["ncoords"][current_match]
 
         # Add new unique sources.
         new_count = len(catalog) - len(current_match)
@@ -1226,6 +1236,9 @@ def find_unique_centroids(catalogs, *, max_separation):
         is_new[current_match] = False
         unique["sky_centroid"][unique_count : unique_count + new_count] = (
             catalog["sky_centroid"][is_new]
+        )
+        unique["ncoords"][unique_count : unique_count + new_count] = (
+            catalog["ncoords"][is_new]
         )
         source_id[is_new] = (
             unique["index"][unique_count : unique_count + new_count]
@@ -1245,9 +1258,11 @@ def find_unique_centroids(catalogs, *, max_separation):
     # Aggregate columns.
     for column in CATALOG_COLUMNS:
         if column.aggregate == "mean":
-            unique[column.name] = (
-                stacked_grouped[column.name].groups.aggregate(np.mean)
-            )
+            values = [
+                np.average(group[column.name], weights=group["ncoords"])
+                for group in stacked_grouped.groups
+            ]
+            unique[column.name] = np.array(values)
 
     # Get the index of the maximum value within each group.
     max_index = [
