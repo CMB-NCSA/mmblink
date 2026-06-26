@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 import argparse
+import logging
 
 import mmblink.ftools as ft
+from mmblink.log import configure_logging
+
 
 
 def cmdline():
@@ -31,10 +34,11 @@ def cmdline():
     return args
 
 
-if __name__ == "__main__":
+def main():
 
     # Get the command-line option
     args = cmdline()
+    configure_logging(level=logging.INFO)
 
     lightcurve = {}
     images = {}
@@ -64,3 +68,6 @@ if __name__ == "__main__":
                       outdir=args.outdir,
                       format=args.plot_format,
                       show=args.show_plot)
+
+if __name__ == "__main__":
+    main()

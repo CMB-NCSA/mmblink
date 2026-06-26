@@ -1,13 +1,9 @@
-from concurrent.futures import ProcessPoolExecutor
 import copy
 from dataclasses import dataclass
-import importlib.metadata
 from itertools import groupby
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import sys
 import time
 import types
 from typing import Literal
@@ -33,14 +29,12 @@ from scipy.stats import norm
 from spt3g import core, maps, sources
 
 from . import cutterlib
+from .log import parallel_process_log
 
 # to ignore astropy NoDetectionsWarning
 warnings.filterwarnings("ignore", category=NoDetectionsWarning)
 
-
-# Logger
-LOGGER = logging.getLogger(__name__)
-LOGGER.propagate = False
+logger = logging.getLogger(__name__)
 
 PPRINT_KEYS = ['label', 'xcentroid', 'ycentroid', 'sky_centroid', 'sky_centroid_dms',
                'max_value', 'snr_max', 'ellipticity', 'area']
@@ -80,7 +74,7 @@ CATALOG_COLUMNS = [
 ]
 
 # Set matplotlib logger at warning level to disengable from default logger
-plt.set_loglevel(level='warning')
+plt.set_loglevel(level='WARNING')
 
 # Update objid, file naming convention
 cutterlib.FITS_OUTNAME = "{outdir}/{objID}_{obsid}_{filter}.{ext}"
@@ -118,44 +112,10 @@ class g3detect:
 
         # Load the configurarion
         self.config = types.SimpleNamespace(**keys)
-
-        # Start Logging
-        self.logger = LOGGER
-        self.setup_logging()
-
         create_dir(self.config.outdir)
 
         # Check input files vs file list
         self.check_input_files()
-
-    def setup_logging(self):
-        """
-        Sets up the logging configuration using `create_logger` and logs key info.
-        Configures logging level, format, and other related settings based on the
-        configuration object. Logs the start of logging and the version of the
-        `mmblink` package.
-
-        Raises:
-        - ValueError: If the logger configuration is invalid or incomplete.
-        """
-
-        # Create the logger
-        if self.logger is None:
-            self.logger = logging.getLogger(__name__)
-        create_logger(logger=self.logger, level=self.config.loglevel,
-                      log_format=self.config.log_format,
-                      log_format_date=self.config.log_format_date)
-        self.logger.info(f"Logging Started at level:{self.config.loglevel}")
-
-        try:
-            # Get the version from the package metadata.
-            version = importlib.metadata.version("mmblink")
-        except importlib.metadata.PackageNotFoundError:
-            # Get the hardcoded version with the risk of a circular import.
-            from mmblink import __version__
-            version = __version__
-
-        self.logger.info(f"Running mmblink version: {version}")
 
     def check_input_files(self):
         """
@@ -176,7 +136,7 @@ class g3detect:
 
         t = magic.Magic(mime=True)
         if len(self.config.files) == 1 and t.from_file(self.config.files[0]) == 'text/plain':
-            self.logger.info(f"{self.config.files[0]} is a list of files")
+            logger.info(f"{self.config.files[0]} is a list of files")
             # Now read them in
             with open(self.config.files[0], 'r') as f:
                 lines = []
@@ -185,11 +145,11 @@ class g3detect:
                         continue
                     lines.append(line)
                 # lines = f.read().splitlines()
-            self.logger.info(f"Read: {len(lines)} input files")
+            logger.info(f"Read: {len(lines)} input files")
             self.files = lines
         else:
             self.files = self.config.files.copy()
-            self.logger.info(f"Detected list of [{len(self.files)}] files")
+            logger.info(f"Detected list of [{len(self.files)}] files")
 
     def load_g3frames(self, filename, k):
         """
@@ -217,8 +177,8 @@ class g3detect:
            - Sets ObservationID and SourceName if they are missing from the frame.
            """
         t0 = time.time()
-        self.logger.info(f"Opening file: {filename}")
-        self.logger.info(f"Doing: {k}/{len(self.files)} files")
+        logger.info(f"Opening file: {filename}")
+        logger.info(f"Doing: {k}/{len(self.files)} files")
 
         frames = []
         metadata_extracted = False
@@ -229,11 +189,11 @@ class g3detect:
                 try:
                     SourceName = frame['SourceName']
                     if self.config.field is not None and SourceName != self.config.field:
-                        self.logger.warning(f"Extracted SourceName: {SourceName} doesn't match configuration")
+                        logger.warning(f"Extracted SourceName: {SourceName} doesn't match configuration")
                 except KeyError:
                     if self.config.field is not None:
                         SourceName = self.config.field
-                    self.logger.warning("Could not extract SourceName from Observation frame")
+                    logger.warning("Could not extract SourceName from Observation frame")
                 metadata_extracted = True
 
             # check if obsID/SourceName are actualy in the frame
@@ -241,24 +201,24 @@ class g3detect:
                 try:
                     obsID = frame['ObservationID']
                 except KeyError:
-                    self.logger.warning("Could not extract obsID from frame")
+                    logger.warning("Could not extract obsID from frame")
                 try:
                     SourceName = frame['SourceName']
                 except KeyError:
                     SourceName = ''
-                    self.logger.warning("Could not extract SourceName from frame")
+                    logger.warning("Could not extract SourceName from frame")
 
             # only read in the map
             if frame.type != core.G3FrameType.Map:
                 continue
             if 'ObservationID' not in frame:
-                self.logger.info(f"Setting ObservationID to: {obsID}")
+                logger.info(f"Setting ObservationID to: {obsID}")
                 frame['ObservationID'] = obsID
             if 'SourceName' not in frame:
-                self.logger.info(f"Setting SourceName to: {SourceName}")
+                logger.info(f"Setting SourceName to: {SourceName}")
                 frame['SourceName'] = SourceName
             frames.append(frame)
-        self.logger.info(f"Total metadata time: {elapsed_time(t0)} for: {filename}")
+        logger.info(f"Total metadata time: {elapsed_time(t0)} for: {filename}")
         return frames
 
     def load_g3frame_map(self, frame):
@@ -293,17 +253,17 @@ class g3detect:
         hdr['BAND'] = (band, 'Observing Frequency')
         self.header[key] = hdr
 
-        self.logger.info(f"Reading frame[Id]: {frame['Id']}")
-        self.logger.debug(f"Reading frame: {frame}")
-        self.logger.debug(f"ObservationID: {obsID}")
-        self.logger.debug(f"Removing weights: {frame['Id']}")
+        logger.info(f"Reading frame[Id]: {frame['Id']}")
+        logger.debug(f"Reading frame: {frame}")
+        logger.debug(f"ObservationID: {obsID}")
+        logger.debug(f"Removing weights: {frame['Id']}")
         t1 = time.time()
         maps.RemoveWeights(frame, zero_nans=True)
-        self.logger.info(f"Remove Weights time: {elapsed_time(t1)}")
+        logger.info(f"Remove Weights time: {elapsed_time(t1)}")
         self.flux[key] = np.asarray(frame['T'])/core.G3Units.mJy
         self.flux_wgt[key] = np.asarray(frame['Wunpol'].TT)*core.G3Units.mJy*core.G3Units.mJy
-        self.logger.debug(f"Min/Max Flux: {self.flux[key].min()} {self.flux[key].max()}")
-        self.logger.debug(f"Min/Max Wgt: {self.flux_wgt[key].min()} {self.flux_wgt[key].max()}")
+        logger.debug(f"Min/Max Flux: {self.flux[key].min()} {self.flux[key].max()}")
+        logger.debug(f"Min/Max Wgt: {self.flux_wgt[key].min()} {self.flux_wgt[key].max()}")
         # Now we exctract the mask
         try:
             # Zero is no data, and Ones is data
@@ -313,16 +273,16 @@ class g3detect:
             # Mask is True for pixels with no data.
             self.flux_mask[key] = flux_mask == 0
         except Exception as e:
-            self.logger.warning(e.message)
+            logger.warning(e.message)
             self.flux_mask[key] = None
-        self.logger.info(f"Map from frame loaded for {obsID} {band}: {elapsed_time(t0)}")
+        logger.info(f"Map from frame loaded for {obsID} {band}: {elapsed_time(t0)}")
         # Adding obsID to list of loaded list
         if obsID not in self.obsIDs:
             self.obsIDs.append(obsID)
         return key
 
     def load_detection_files(self):
-        self.logger.info("Loading detect_cat files for detections.")
+        logger.info("Loading detect_cat files for detections.")
         results = []
         for file in self.config.detect_cat:
             try:
@@ -350,16 +310,11 @@ class g3detect:
             Re-raises any exception raised by a file, adding a note of the
             failing file.
         """
-        if self.config.np > 1:
-            self.logger.warning(
-                "Multiprocessing is currently disabled. "
-                "Running detection jobs serially."
-            )
-            return self.detect_all_sources_serial()
-            # self.logger.info("Running detection jobs with multiprocessing")
-            # return self.detect_all_sources_async()
+        if self.config.np != 1:
+            logger.info("Running detection jobs in parallel")
+            return self.detect_all_sources_parallel()
         else:
-            self.logger.info("Running detection jobs serially")
+            logger.info("Running detection jobs serially")
             return self.detect_all_sources_serial()
 
     def detect_all_sources_serial(self):
@@ -387,25 +342,25 @@ class g3detect:
         for i, file in enumerate(self.files):
             t0 = time.time()
             try:
-                self.logger.info(f"Opening file: {file}")
-                self.logger.info(f"Doing: {i}/{len(self.files)} files")
+                logger.info(f"Opening file: {file}")
+                logger.info(f"Doing: {i}/{len(self.files)} files")
                 result = detect_sources_in_file(file, self.config)
             except Exception as e:
                 message = f"Occurred at file {file}."
                 e.add_note(message)
                 raise
             results.append(result)
-            self.logger.info(f"Completed: {i}/{len(self.files)} files")
-            self.logger.info(f"Total time: {elapsed_time(t0)} for: {file}")
+            logger.info(f"Completed: {i}/{len(self.files)} files")
+            logger.info(f"Total time: {elapsed_time(t0)} for: {file}")
         self.detect_catalogs = [
             catalog for catalog in results if catalog is not None
         ]
-        self.logger.info(
+        logger.info(
             f"Total time: {elapsed_time(start_time)} for detecting all sources"
         )
         return results
 
-    def detect_all_sources_async(self):
+    def detect_all_sources_parallel(self):
         """Find detections across all files in parallel with modular loading.
 
         If any file raises an exception during the detection process:
@@ -427,25 +382,26 @@ class g3detect:
         """
         # When workers is None, as many workers as processors are used.
         workers = None if self.config.np == 0 else self.config.np
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(detect_sources_in_file, file, self.config)
-                for file in self.files
-            ]
-            results = []
-            for index, future in enumerate(futures):
-                try:
-                    result = future.result()
-                except Exception as e:
-                    message = f"Occurred at file {self.files[index]}."
-                    e.add_note(message)
-                    # Futures that are already running cannot be canceled, so it
-                    # may take some time for the program to fully complete even
-                    # after an exception is raised.
-                    for future in futures:
-                        future.cancel()
-                    raise
-                results.append(result)
+        with parallel_process_log() as ProcessPoolExecutor:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(detect_sources_in_file, file, self.config)
+                    for file in self.files
+                ]
+                results = []
+                for index, future in enumerate(futures):
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        message = f"Occurred at file {self.files[index]}."
+                        e.add_note(message)
+                        # Futures that are already running cannot be canceled, so it
+                        # may take some time for the program to fully complete even
+                        # after an exception is raised.
+                        for future in futures:
+                            future.cancel()
+                        raise
+                    results.append(result)
         self.detect_catalogs = [
             catalog for catalog in results if catalog is not None
         ]
@@ -463,7 +419,7 @@ class g3detect:
         This function is named collect_dual for legacy purposes. It is capable of
         handling any number of bands.
         """
-        self.logger.info("Collecting sources detected in each observation.")
+        logger.info("Collecting sources detected in each observation.")
         # Sort catalogs by obsID then band so that sources within each
         # observation can be matched by band. Then, the sources from each
         # observation detected in multiple bands are matched to a final catalog.
@@ -485,7 +441,7 @@ class g3detect:
             )) for obsid, catalogs in obs_groups
         ]
 
-        self.logger.info("Filtering sources not detected in multiple bands.")
+        logger.info("Filtering sources not detected in multiple bands.")
         # Filter to only contain sources detected in multiple bands.
         group_catalogs = [
             (obsid, catalog[catalog["ncoords"] > 1]) for obsid, catalog
@@ -497,7 +453,7 @@ class g3detect:
             if len(catalog) > 0
         ]
 
-        self.logger.info(
+        logger.info(
             "Collecting sources detected in multiple bands per observation."
         )
         # Match sources across observations.
@@ -520,7 +476,7 @@ class g3detect:
         # band can be matched. Then, the sources from each band are matched to
         # a final catalog. Band order is determined by the order of
         # detect_bands.
-        self.logger.info("Collecting sources detected in each band.")
+        logger.info("Collecting sources detected in each band.")
         sorted_catalogs = sorted(
             self.detect_catalogs,
             key=lambda x: (
@@ -543,7 +499,7 @@ class g3detect:
             catalog.meta["band"] = self.config.detect_bands[band_index]
 
         # Match sources across bands.
-        self.logger.info("Collecting sources across bands.")
+        logger.info("Collecting sources across bands.")
         stacked = find_unique_centroids(
             [catalog for _, catalog in group_catalogs],
             max_separation=self.config.max_sep,
@@ -560,7 +516,7 @@ class g3detect:
     def make_stamps_and_lighcurves(self):
         # Generate cutouts and repack stamps and lightcurve results
         if self.stacked_centroids is None:
-            self.logger.warning("Will not make stamps or light curves: NO centroids")
+            logger.warning("Will not make stamps or light curves: No centroids")
             return
         self.run_cutouts(self.stacked_centroids)
         self.repack_lc()
@@ -704,13 +660,13 @@ class g3detect:
         - OSError: If there are any issues during file operations (e.g., permission issues during removal).
         """
 
-        self.logger.info("Repacking stamps into single file per source")
+        logger.info("Repacking stamps into single file per source")
         for k, stamp_name in enumerate(self.cutout_names):
             position = (self.ra_centroid[k], self.dec_centroid[k])
             snr_max = self.snr_max[k]
             for band in self.cutout_names[stamp_name].keys():
                 fitsfile = f"{self.config.outdir}/{stamp_name}_{band}.fits"
-                self.logger.debug(f"Combining into: {fitsfile}")
+                logger.debug(f"Combining into: {fitsfile}")
                 filenames = self.cutout_names[stamp_name][band]
                 # Sort the filenames -- will be sorted by obsID in the filename
                 filenames.sort()
@@ -749,7 +705,7 @@ class g3detect:
         else:
             path = os.path.join(self.config.outdir, f"centroids.cat")
         catalog.write(path, overwrite=True, format="ascii.ecsv")
-        LOGGER.info(f"Wrote catalog to: {path}")
+        logger.info(f"Wrote catalog to: {path}")
 
 def get_fits_map(filename):
     """Read data and metadata from a FITS file of a map.
@@ -811,12 +767,12 @@ def detect_sources_in_file(filename, config):
             f"Invalid file extension at {filename}. "
             "Only FITS files are currently supported."
         )
-    LOGGER.info(f"This file: {filename} is {filetype} file")
+    logger.info(f"This file: {filename} is {filetype} file")
     header, hdus = get_fits_map(filename)
     obsid = header["OBSID"]
     band = header["BAND"]
     if band in config.detect_bands:
-        LOGGER.info((f"Running detection for {obsid}_{band}"))
+        logger.info((f"Running detection for {obsid}_{band}"))
         flux = hdus["flux"]
         wgt = hdus["wgt"]
         mask = hdus["mask"]
@@ -866,23 +822,21 @@ def detect_sources_in_file(filename, config):
                 (cat["ellipticity"] >= config.ell_cut) |
                 np.isnan(cat["ellipticity"])
             )
-            LOGGER.info(
+            logger.info(
                 f"Removing {np.count_nonzero(remove_mask)} source(s) "
                 f"with ellipticity >= {config.ell_cut}"
             )
-            LOGGER.debug("Will remove:")
-            if LOGGER.getEffectiveLevel() == logging.DEBUG:
-                print(cat[PPRINT_KEYS][remove_mask])
+            logger.debug("Will remove:\n%s", cat[PPRINT_KEYS][remove_mask])
             cat = cat[~remove_mask]
         if cat is None or len(cat) == 0:
             # Either no sources were detected or they were all filtered.
-            LOGGER.info(f"Will not include catalog for {obsid}_{band}")
+            logger.info(f"Will not include catalog for {obsid}_{band}")
             return None
         else:
             cat.meta["band"] = band
             cat.meta["obsID"] = obsid
             cat.meta["field"] = field
-            LOGGER.info(f"Adding obs_max/ncoords column for {band}:{obsid}")
+            logger.info(f"Adding obs_max/ncoords column for {band}:{obsid}")
             cat.add_column(f"{obsid}_{band}", name="obs_max", index=0)
             cat["ncoords"] = np.ones(len(cat), dtype=np.int64)
 
@@ -893,10 +847,10 @@ def detect_sources_in_file(filename, config):
             if config.write_obscat:
                 catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
                 cat.write(catname, overwrite=True, format="ascii.ecsv")
-                LOGGER.info(f"Wrote catalog to: {catname}")
+                logger.info(f"Wrote catalog to: {catname}")
             return cat
     else:
-        LOGGER.info(
+        logger.info(
             f"Will not run detection for {obsid}_{band} -- "
             "not in detection bands"
         )
@@ -909,12 +863,12 @@ def remove_non_repeat_sources(catalog, ncoords=1):
         remove_mask = catalog["ncoords"] < ncoords
         remove_count = np.count_nonzero(remove_mask)
         if remove_count > 0:
-            LOGGER.info(
+            logger.info(
                 f"Removing {remove_count} sources with ncoords < {ncoords}"
             )
         return catalog[~remove_mask]
     else:
-        LOGGER.warning(f"Will not remove non-repeats ncoords <= 1: ncoords: {ncoords}")
+        logger.warning(f"Will not remove non-repeats ncoords <= 1: ncoords: {ncoords}")
         return catalog
 
 
@@ -959,7 +913,7 @@ def concatenate_fits(input_files, output_file, id, band, position, snr_max):
                 wgt_header = fits_in[wgt_hdu].read_header()
                 fits_out.write(wgt_data, header=wgt_header, extname=f"WGT_{idx+1}")
 
-        LOGGER.debug(f"Successfully created {output_file} with {len(input_files) * 2} extensions.")
+        logger.debug(f"Successfully created {output_file} with {len(input_files) * 2} extensions.")
 
 
 def remove_files(filelist, remove_parents=True):
@@ -980,16 +934,16 @@ def remove_files(filelist, remove_parents=True):
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-                LOGGER.debug(f"Successfully removed: {file_path}")
+                logger.debug(f"Successfully removed: {file_path}")
 
                 # Collect parent directory path
                 parent_dir = os.path.dirname(file_path)
                 if parent_dir:
                     parent_dirs.add(parent_dir)
             else:
-                LOGGER.warning(f"File does not exist: {file_path}")
+                logger.warning(f"File does not exist: {file_path}")
         except Exception as e:
-            LOGGER.error(f"Error removing {file_path}: {e}")
+            logger.error(f"Error removing {file_path}: {e}")
 
     # Optionally remove parent directories if they are empty
     if remove_parents:
@@ -997,92 +951,11 @@ def remove_files(filelist, remove_parents=True):
             try:
                 if os.path.isdir(parent_dir) and not os.listdir(parent_dir):  # Check if empty
                     os.rmdir(parent_dir)
-                    LOGGER.debug(f"Removed empty directory: {parent_dir}")
+                    logger.debug(f"Removed empty directory: {parent_dir}")
             except Exception as e:
-                LOGGER.error(f"Error removing directory {parent_dir}: {e}")
+                logger.error(f"Error removing directory {parent_dir}: {e}")
 
-    LOGGER.debug("Files removed" + (", including empty directories" if remove_parents else ""))
-
-
-def configure_logger(logger, logfile=None, level=logging.NOTSET, log_format=None, log_format_date=None):
-    """
-    Configure an existing logger with specified settings. Sets the format,
-    logging level, and handlers for the given logger. If a logfile is provided,
-    logs are written to both the console and the file with rotation. If no log
-    format or date format is provided, default values are used.
-
-    Parameters:
-    - logger (logging.Logger): The logger to configure.
-    - logfile (str, optional): Path to the log file. If `None`, logs to the console.
-    - level (int): Logging level (e.g., `logging.INFO`, `logging.DEBUG`).
-    - log_format (str, optional): Log message format (default is detailed format with function name).
-    - log_format_date (str, optional): Date format for logs (default is `'%Y-%m-%d %H:%M:%S'`).
-    """
-    # Define formats
-    if log_format:
-        FORMAT = log_format
-    else:
-        FORMAT = '[%(asctime)s.%(msecs)03d][%(levelname)s][%(name)s][%(funcName)s] %(message)s'
-    if log_format_date:
-        FORMAT_DATE = log_format_date
-    else:
-        FORMAT_DATE = '%Y-%m-%d %H:%M:%S'
-    formatter = logging.Formatter(FORMAT, FORMAT_DATE)
-
-    # Need to set the root logging level as setting the level for each of the
-    # handlers won't be recognized unless the root level is set at the desired
-    # appropriate logging level. For example, if we set the root logger to
-    # INFO, and all handlers to DEBUG, we won't receive DEBUG messages on
-    # handlers.
-    logger.setLevel(level)
-
-    handlers = []
-    # Set the logfile handle if required
-    if logfile:
-        fh = RotatingFileHandler(logfile, maxBytes=2000000, backupCount=10)
-        fh.setFormatter(formatter)
-        fh.setLevel(level)
-        handlers.append(fh)
-        logger.addHandler(fh)
-
-    # Set the screen handle
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(formatter)
-    sh.setLevel(level)
-    handlers.append(sh)
-    logger.addHandler(sh)
-    return
-
-
-def create_logger(logger=None, logfile=None, level=logging.NOTSET, log_format=None, log_format_date=None):
-    """
-    Configures and returns a logger with specified settings.
-    Sets up logging based on provided level, format, and output file. Can be
-    used for both `setup_logging` and other components.
-
-    Parameters:
-    - logger (logging.Logger, optional): The logger to configure. If `None`, a new logger
-      is created.
-    - logfile (str, optional): Path to the log file. If `None`, logs to the console.
-    - level (int): Logging level (e.g., `logging.INFO`, `logging.DEBUG`).
-    - log_format (str, optional): Format for log messages (e.g., `'%(asctime)s - %(message)s'`).
-    - log_format_date (str, optional): Date format for logs (e.g., `'%Y-%m-%d %H:%M:%S'`).
-
-    Returns:
-    logging.Logger: The configured logger instance.
-
-    Raises:
-    - ValueError: If the log level or format is invalid.
-    """
-
-    if logger is None:
-        logger = logging.getLogger(__name__)
-    configure_logger(logger, logfile=logfile, level=level,
-                     log_format=log_format, log_format_date=log_format_date)
-    logging.basicConfig(handlers=logger.handlers, level=level)
-    logger.propagate = False
-    logger.info(f"Logging Started at level:{level}")
-    return logger
+    logger.debug("Files removed" + (", including empty directories" if remove_parents else ""))
 
 
 def elapsed_time(t1, verb=False):
@@ -1105,7 +978,7 @@ def elapsed_time(t1, verb=False):
     t2 = time.time()
     stime = "%dm %2.2fs" % (int((t2-t1)/60.), (t2-t1) - 60*int((t2-t1)/60.))
     if verb:
-        print("Elapsed time: {}".format(stime))
+        logger.info("Elapsed time: {}".format(stime))
     return stime
 
 
@@ -1128,7 +1001,7 @@ def create_dir(dirname):
         # because a separate thread may create the directory in the time between
         # checking and creating the directory.
         os.makedirs(dirname, mode=0o755, exist_ok=False)
-        LOGGER.info(f"Created directory: {dirname}")
+        logger.info(f"Created directory: {dirname}")
     except FileExistsError:
         # Do nothing if the directory already exists.
         pass
@@ -1390,7 +1263,7 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
         bkg = compute_rms2D(data, mask=mask, box=box, filter_size=filter_size, sigmaclip=sigmaclip)
         sigma2D = bkg.background_rms if mask is None else np.where(mask, np.nan, bkg.background_rms)
         threshold = nsigma_thresh * sigma2D
-        LOGGER.debug(f"2D RMS computed in {elapsed_time(t0)}")
+        logger.debug(f"2D RMS computed in {elapsed_time(t0)}")
         # Dump 2D rms image into a fits file
         if rms2Dimage:
             hdr = wcs.to_header()
@@ -1399,13 +1272,13 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
             fits = fitsio.FITS(fitsname, 'rw', clobber=True)
             fits.write(sigma2D, header=hdr)
             fits.close()
-            LOGGER.info(f"2D RMS FITS image: {fitsname}")
+            logger.info(f"2D RMS FITS image: {fitsname}")
         if plot:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 9))
             plot_distribution(ax1, data if mask is None else data[~mask], mean, sigma, nsigma=nsigma_thresh)
             plot_rms2D(bkg.background, ax2, mask=mask)
             plt.savefig(f"{plot_name}_bkg.pdf")
-            LOGGER.info(f"Created: {plot_name}_bkg.pdf")
+            logger.info(f"Created: {plot_name}_bkg.pdf")
     else:
         threshold = nsigma_thresh * sigma
 
@@ -1414,12 +1287,12 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
     segm = finder(data, threshold, mask=mask)
     # We stop if we don't find source
     if segm is None:
-        LOGGER.info("No sources found in astropy/segm, returning (None, None)")
+        logger.info("No sources found in astropy/segm, returning (None, None)")
         return None, None
     cat = SourceCatalog(data, segm, error=wgt, mask=mask, wcs=wcs, progress_bar=True)
 
-    LOGGER.info(f"detect_with_photutils runtime: {elapsed_time(t0)}")
-    LOGGER.info(f"Found: {len(cat)} objects")
+    logger.info(f"detect_with_photutils runtime: {elapsed_time(t0)}")
+    logger.info(f"Found: {len(cat)} objects")
 
     # Nicer formatting
     tbl = cat.to_table([col.name for col in CATALOG_COLUMNS if col.photutils])
@@ -1433,8 +1306,7 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
     snr_max = compute_snr(tbl, threshold/nsigma_thresh, key='max_value')
     tbl.add_column(snr_max, name='snr_max')
     tbl['snr_max'].info.format = '.2f'
-    print(tbl['label', 'xcentroid', 'ycentroid', 'sky_centroid', 'sky_centroid_dms',
-              'max_value', 'snr_max', 'eccentricity', 'elongation', 'ellipticity', 'area'])
+    logger.info(f"Detection catalog:\n{tbl[PPRINT_KEYS]}")
     if plot:
         t1 = time.time()
         if rms2D:
@@ -1449,13 +1321,13 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
             plot_rms2D(bkg.background, ax4, mask=mask)
         if plot_name:
             plt.savefig(f"{plot_name}.pdf")
-            LOGGER.info(f"Saved: {plot_name}.pdf")
+            logger.info(f"Saved: {plot_name}.pdf")
         else:
             plt.show()
         plt.close()
-        LOGGER.info(f"detect_with_photutils PLOT runtime: {elapsed_time(t1)}")
+        logger.info(f"detect_with_photutils PLOT runtime: {elapsed_time(t1)}")
 
-    LOGGER.info(f"detect_with_photutils TOTAL runtime: {elapsed_time(t0)}")
+    logger.info(f"detect_with_photutils TOTAL runtime: {elapsed_time(t0)}")
     return segm, tbl
 
 
@@ -1490,7 +1362,7 @@ def g3_or_fits(filename):
         return "G3"
     else:
         msg = f"Could not find filetype for file {filename}"
-        LOGGER.warning(msg)
+        logger.error(msg)
         raise ValueError(msg)
 
 
@@ -1669,7 +1541,7 @@ def get_sources_catalog(field, point_source_file=None):
     if point_source_file is None:
         point_source_file = sources.get_field_source_list(field, analysis="lightcurve")
     _, psra, psdec, _ = sources.read_point_source_mask_file(point_source_file)
-    LOGGER.debug(f"Loading source mask positions from file: {point_source_file}")
+    logger.debug(f"Loading source mask positions from file: {point_source_file}")
     # Create a SkyCoord object with the sources catalog to make the matching
     # psra and psdec are in G3 units and need to be converted back to degrees to be use in astropy
     psra = psra/core.G3Units.deg
@@ -1703,7 +1575,7 @@ def remove_objects_near_sources(cat, field, point_source_file=None, max_dist=5*u
     try:
         pscat = get_sources_catalog(field, point_source_file)
     except KeyError:
-        LOGGER.warning(f"Cannot get sources catalog for field: {field}")
+        logger.warning(f"Cannot get sources catalog for field: {field}")
         return cat
 
     # Extract the SkyCoord object
@@ -1711,12 +1583,10 @@ def remove_objects_near_sources(cat, field, point_source_file=None, max_dist=5*u
     remove_mask = np.zeros(len(cat), dtype=bool)
     remove_mask[ind_cat] = True
     if len(ind_cat) > 0:
-        LOGGER.info(f"Found {len(ind_cat)} matches, will remove them from catalog")
-        LOGGER.debug("Will remove: ")
-        if LOGGER.getEffectiveLevel() == logging.DEBUG:
-            print(cat[remove_mask][PPRINT_KEYS])
+        logger.info(f"Found {len(ind_cat)} matches, will remove them from catalog")
+        logger.debug(f"Will remove:\n{cat[remove_mask][PPRINT_KEYS]}")
     else:
-        LOGGER.info("No matches found in sources catalog")
+        logger.info("No matches found in sources catalog")
     return cat[~remove_mask]
 
 
