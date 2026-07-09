@@ -1155,10 +1155,13 @@ def find_unique_centroids(catalogs, *, max_separation):
 
     Returns
     -------
-    unique : astropy.table.Table
+    unique : astropy.table.Table or None
         A catalog of unique sources derived from the cross-matching process
-        containing aggregated source properties.
+        containing aggregated source properties. If there are no catalogs None
+        is returned.
     """
+    if len(catalogs) == 0:
+        return None
     # Create an empty catalog to store unique sources with the same length as
     # the original catalog. This allows adding new rows without reallocation.
     full_length = sum(len(catalog) for catalog in catalogs)
