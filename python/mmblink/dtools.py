@@ -1,6 +1,8 @@
 from concurrent.futures import ProcessPoolExecutor
 import copy
+from dataclasses import dataclass
 import importlib.metadata
+from itertools import groupby
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -8,6 +10,7 @@ from pathlib import Path
 import sys
 import time
 import types
+from typing import Literal
 import warnings
 
 from astropy import units as u
@@ -25,6 +28,7 @@ import numpy.ma as ma
 import photutils.background
 from photutils.segmentation import SourceCatalog, SourceFinder
 from photutils.utils.exceptions import NoDetectionsWarning
+from scipy.optimize import linear_sum_assignment
 from scipy.stats import norm
 from spt3g import core, maps, sources
 
@@ -41,6 +45,39 @@ LOGGER.propagate = False
 PPRINT_KEYS = ['label', 'xcentroid', 'ycentroid', 'sky_centroid', 'sky_centroid_dms',
                'max_value', 'snr_max', 'ellipticity', 'area']
 
+@dataclass(frozen=True)
+class ColumnDescription:
+    name : str
+    photutils : bool
+    aggregate : Literal["mean", "max_source", "other"]
+
+CATALOG_COLUMNS = [
+    ColumnDescription("obs_max", False, "max_source"),
+    ColumnDescription("snr_max", False, "max_source"),
+    ColumnDescription("label", True, "max_source"),
+    ColumnDescription("sky_centroid", True, "other"),
+    ColumnDescription("xcentroid", True, "mean"),
+    ColumnDescription("ycentroid", True, "mean"),
+    ColumnDescription("ncoords", False, "other"),
+    ColumnDescription("bbox_xmin", True, "max_source"),
+    ColumnDescription("bbox_xmax", True, "max_source"),
+    ColumnDescription("bbox_ymin", True, "max_source"),
+    ColumnDescription("bbox_ymax", True, "max_source"),
+    ColumnDescription("area", True, "max_source"),
+    ColumnDescription("semimajor_sigma", True, "max_source"),
+    ColumnDescription("semiminor_sigma", True, "max_source"),
+    ColumnDescription("orientation", True, "max_source"),
+    ColumnDescription("eccentricity", True, "max_source"),
+    ColumnDescription("min_value", True, "max_source"),
+    ColumnDescription("max_value", True, "max_source"),
+    ColumnDescription("segment_flux", True, "max_source"),
+    ColumnDescription("segment_fluxerr", True, "max_source"),
+    ColumnDescription("kron_flux", True, "max_source"),
+    ColumnDescription("kron_fluxerr", True, "max_source"),
+    ColumnDescription("elongation", True, "max_source"),
+    ColumnDescription("ellipticity", True, "max_source"),
+    ColumnDescription("sky_centroid_dms", False, "other"),
+]
 
 # Set matplotlib logger at warning level to disengable from default logger
 plt.set_loglevel(level='warning')
@@ -414,111 +451,111 @@ class g3detect:
         ]
         return results
 
-    def match_dual_bands(self):
-        """Match sources in the same observation detected in two bands.
-
-        The list of detection catalogs stored in detect_catalogs is used for
-        matching.
-
-        Returns
-        -------
-        matched : dict or None
-            Dictionary mapping obsID to a matched catalog of sources or None if
-            matching could not occur.
-        """
-
-        if len(self.config.detect_bands) != 2:
-            self.logger.info(f"Not enough bands: {self.config.detect_bands} to run dual match")
-            return None
-
-        catalogs_by_obsid = {}
-        for catalog in self.detect_catalogs:
-            catalog_list = catalogs_by_obsid.get(catalog.meta["obsID"])
-            if catalog_list is None:
-                catalogs_by_obsid[catalog.meta["obsID"]] = [catalog]
-            else:
-                catalog_list.append(catalog)
-
-        matched_cat = {}
-        for obsid, catalogs in catalogs_by_obsid.items():
-            bands = [catalog.meta["band"] for catalog in catalogs]
-            if set(bands) == set(self.config.detect_bands):
-                cat1 = catalogs[0]
-                cat2 = catalogs[1]
-                band1 = cat1.meta["band"]
-                band2 = cat2.meta["band"]
-                self.logger.info(f"Attempting dual band match for obsID: {obsid} -- {band1} vs {band2}")
-                matched = find_dual_detections(cat1, cat2)
-                if matched is None:
-                    continue
-                matched_cat[obsid] = matched
-            else:
-                self.logger.debug(f"No dual match for {obsid}, bands: {bands}.")
-        self.logger.info("---------------------------- Done dual band -------------------------")
-        return matched_cat
-
     def collect_dual(self):
-        # Function to collect and match sources in dual detection
+        """Collect sources with detections in multiple bands.
 
-        matched_dual = self.match_dual_bands()
-        if len(matched_dual) == 0:
-            self.logger.warning("No sources could be matched -- stopping here")
-            return
+        Each observation of a source is only considered if it contains the
+        source in more than one band within the same observation ID. The valid
+        observations are then stacked to create the final source catalog.
 
-        self.logger.info("Running unique centroids for dual matching per obsID")
-        self.stacked_centroids = find_unique_centroids(
-            matched_dual, separation=self.config.max_sep, plot=False
+        Notes
+        -----
+        This function is named collect_dual for legacy purposes. It is capable of
+        handling any number of bands.
+        """
+        self.logger.info("Collecting sources detected in each observation.")
+        # Sort catalogs by obsID then band so that sources within each
+        # observation can be matched by band. Then, the sources from each
+        # observation detected in multiple bands are matched to a final catalog.
+        # Band order is determined by the order of detect_bands.
+        sorted_catalogs = sorted(
+            self.detect_catalogs,
+            key=lambda x: (
+                x.meta["obsID"],
+                self.config.detect_bands.index(x.meta["band"]),
+            )
         )
-        # Remove non repeat sources
-        self.stacked_centroids = remove_non_repeat_sources(
-            self.stacked_centroids, ncoords=self.config.nr
+        # For each observation, perform a multi-band match.
+        # Note: it is not necessary to store obsid here, but it is symmetric
+        # with the single band algorithm, which requires storing the band.
+        obs_groups = groupby(sorted_catalogs, key=lambda x: x.meta["obsID"])
+        group_catalogs = [
+            (obsid, find_unique_centroids(
+                list(catalogs), max_separation=self.config.max_sep
+            )) for obsid, catalogs in obs_groups
+        ]
+
+        self.logger.info("Filtering sources not detected in multiple bands.")
+        # Filter to only contain sources detected in multiple bands.
+        group_catalogs = [
+            (obsid, catalog[catalog["ncoords"] > 1]) for obsid, catalog
+            in group_catalogs
+        ]
+        # Some catalogs may be empty now.
+        group_catalogs = [
+            (obsid, catalog) for obsid, catalog in group_catalogs
+            if len(catalog) > 0
+        ]
+
+        self.logger.info(
+            "Collecting sources detected in multiple bands per observation."
         )
-        # Write catalogs with centroids
-        self.write_centroids(self.stacked_centroids)
+        # Match sources across observations.
+        stacked = find_unique_centroids(
+            [catalog for _, catalog in group_catalogs],
+            max_separation=self.config.max_sep,
+        )
+        stacked = remove_non_repeat_sources(stacked, self.config.nr)
+        self.add_catalog_id(stacked)
+        self.stacked_centroids = stacked
+        self.write_centroids(stacked)
 
     def collect_single(self):
-        # Function to collect and match sources in single_detection
+        """Collect sources one band at a time, then collect them all.
 
-        # Make a per band call to find_unique_centroids() in order to get
-        # the unique centroids in each of the detection bands
-        # Store the centroids in dict keyed to band.
-        catalogs_by_band = {}
-        for catalog in self.detect_catalogs:
-            catalogs = catalogs_by_band.get(catalog.meta["band"])
-            if catalogs is None:
-                catalogs_by_band[catalog.meta["band"]] = {
-                    catalog.meta["obsID"]: catalog
-                }
-            else:
-                catalogs[catalog.meta["obsID"]] = catalog
-        centroids = {}
-        for band, catalog in catalogs_by_band.items():
-            self.logger.info(f"Getting unique centroids for band: {band}")
-            # Proceed only if we have any catalogs
-            if len(catalog) > 0:
-                centroids[band] = find_unique_centroids(
-                    catalog, separation=self.config.max_sep, plot=False
-                )
-            else:
-                self.logger.warning(f"Skipping band: {band} --  no catalogs")
-        # And now get the unique/stacked centroids
-        if len(centroids) == 0:
-            self.logger.warning("Skipping stacked_centroids --  no catalogs")
-            self.logger.warning("Will NOT write centroids")
-            self.stacked_centroids = None
-            return
+        Sources are first collected within each band and then combined between
+        bands. Each stacked catalog of sources per band is also saved to a file.
+        """
+        # Sort catalogs by band then obsID so that sources within each
+        # band can be matched. Then, the sources from each band are matched to
+        # a final catalog. Band order is determined by the order of
+        # detect_bands.
+        self.logger.info("Collecting sources detected in each band.")
+        sorted_catalogs = sorted(
+            self.detect_catalogs,
+            key=lambda x: (
+                self.config.detect_bands.index(x.meta["band"]),
+                x.meta["obsID"],
+            )
+        )
+        # For each band, match sources in that band.
+        band_groups = groupby(
+            sorted_catalogs,
+            key=lambda x: self.config.detect_bands.index(x.meta["band"]),
+        )
+        group_catalogs = [
+            (band_index, find_unique_centroids(
+                list(catalogs), max_separation=self.config.max_sep
+            ))
+            for band_index, catalogs in band_groups
+        ]
+        for band_index, catalog in group_catalogs:
+            catalog.meta["band"] = self.config.detect_bands[band_index]
 
-        self.stacked_centroids = find_unique_centroids(
-            centroids, separation=self.config.max_sep, plot=False
+        # Match sources across bands.
+        self.logger.info("Collecting sources across bands.")
+        stacked = find_unique_centroids(
+            [catalog for _, catalog in group_catalogs],
+            max_separation=self.config.max_sep,
         )
-        # Remove non repeat sources
-        self.stacked_centroids = remove_non_repeat_sources(
-            self.stacked_centroids, ncoords=self.config.nr
-        )
-        # Write catalogs with centroids and per band
-        self.write_centroids(self.stacked_centroids)
-        for band, catalog in centroids.items():
-            self.write_centroids(catalog, band=band)
+        stacked = remove_non_repeat_sources(stacked, self.config.nr)
+        self.add_catalog_id(stacked)
+        self.stacked_centroids = stacked
+        # Write all stacked centroids and stacked centroids per band.
+        self.write_centroids(stacked)
+        for _, catalog in group_catalogs:
+            self.add_catalog_id(catalog)
+            self.write_centroids(catalog)
 
     def make_stamps_and_lighcurves(self):
         # Generate cutouts and repack stamps and lightcurve results
@@ -680,31 +717,39 @@ class g3detect:
                 concatenate_fits(filenames, fitsfile, stamp_name, band, position, snr_max)
                 remove_files(filenames)
 
-    def write_centroids(self, catalog, band=None):
+    def add_catalog_id(self, catalog):
+        """Add an ID column to a source catalog in place.
 
-        # Make a copy of the catalog, so that changes are not propagated
-        CAT_KEYS = ['index', 'id', 'band', 'label', 'obs_max',
-                    'xcentroid', 'ycentroid',
-                    'sky_centroid', 'sky_centroid_dms',
-                    'max_value', 'snr_max', 'ellipticity', 'area', 'ncoords']
+        Parameters
+        ----------
+        catalog : astropy.table.Table
+            The catalog to add an ID column. Must contain a `"sky_centroid"`
+            column for the ID.
+        """
+        ra = catalog["sky_centroid"].ra.data
+        dec = catalog["sky_centroid"].dec.data
+        ids = cutterlib.get_id_names(ra, dec, self.config.prefix)
+        catalog.add_column(ids, name="id", index=0)
 
-        # Add id -- only if not already there
-        if 'id' not in catalog.columns:
-            # Extract ra and dec from cat:
-            ra = catalog['sky_centroid'].ra.data
-            dec = catalog['sky_centroid'].dec.data
-            ids = cutterlib.get_id_names(ra, dec, self.config.prefix)
-            catalog.add_column(ids, name='id', index=0)
-        if band:
-            catname = os.path.join(self.config.outdir, f"centroids_{band}.cat")
-            msg = f"Wrote {band} catalog to: {catname}"
+    def write_centroids(self, catalog):
+        """Write a catalog of centroids to a file.
+
+        If the catalog has a band meta value, it is treated as a band-specific
+        centroid catalog and named appropriately. Otherwise, it is considered a
+        general centroid catalog.
+
+        Parameters
+        ----------
+        catalog : astropy.table.Table
+            The catalog to save.
+        """
+        band = catalog.meta.get("band")
+        if band is not None:
+            path = os.path.join(self.config.outdir, f"centroids_{band}.cat")
         else:
-            catname = os.path.join(self.config.outdir, "centroids.cat")
-            msg = f"Wrote combined catalog to: {catname}"
-        ascii.write(catalog[CAT_KEYS],
-                    catname, overwrite=True, format='fixed_width')
-        self.logger.info(msg)
-
+            path = os.path.join(self.config.outdir, f"centroids.cat")
+        catalog.write(path, overwrite=True, format="ascii.ecsv")
+        LOGGER.info(f"Wrote catalog to: {path}")
 
 def get_fits_map(filename):
     """Read data and metadata from a FITS file of a map.
@@ -837,10 +882,14 @@ def detect_sources_in_file(filename, config):
             cat.meta["band"] = band
             cat.meta["obsID"] = obsid
             cat.meta["field"] = field
-            LOGGER.info(f"Adding obs/obs_max/band column for {band}:{obsid}")
-            cat.add_column(obsid, name="obs", index=0)
+            LOGGER.info(f"Adding obs_max/ncoords column for {band}:{obsid}")
             cat.add_column(f"{obsid}_{band}", name="obs_max", index=0)
-            cat.add_column(band, name="band", index=0)
+            cat["ncoords"] = np.ones(len(cat), dtype=np.int64)
+
+            # We must make sure we have included all the necessary columns.
+            for column in CATALOG_COLUMNS:
+                assert column.name in cat.colnames
+
             if config.write_obscat:
                 catname = os.path.join(config.outdir, f"{obsid}_{band}_full.cat")
                 cat.write(catname, overwrite=True, format="ascii.ecsv")
@@ -852,18 +901,6 @@ def detect_sources_in_file(filename, config):
             "not in detection bands"
         )
         return None
-
-
-def check_index_ncoords_columns(catalog):
-    # Make sure that index is present as a column
-    if 'index' not in catalog.colnames:
-        tblidx = np.arange(len(catalog)) + 1
-        catalog.add_column(tblidx, name='index', index=0)
-    if 'ncoords' not in catalog.columns:
-        ncoords = np.ones(len(catalog), dtype='int')
-        catalog.add_column(ncoords, name='ncoords')
-
-    return catalog
 
 
 def remove_non_repeat_sources(catalog, ncoords=1):
@@ -1097,559 +1134,154 @@ def create_dir(dirname):
         pass
 
 
-def find_dual_detections(t1, t2, separation=20, plot=False):
+def find_unique_centroids(catalogs, *, max_separation):
+    """Match nearby sources and catalog them.
+
+    This function identifies unique sources by iteratively matching coordinates
+    in catalogs. It matches the first catalog with the second, then matches the
+    next catalog against the combined unique sources identified from the
+    previous catalogs, and so on. Matching occurs such that sources are never
+    matched with other sources within the same catalog.
+
+    A table is created with aggregated properties of each unique source.
+
+    Parameters
+    ----------
+    catalogs : list of astropy.table.Table
+        The catalogs to perform matching.
+    max_separation : float
+        The angular distance threshold below which two sources are considered a
+        match.
+
+    Returns
+    -------
+    unique : astropy.table.Table or None
+        A catalog of unique sources derived from the cross-matching process
+        containing aggregated source properties. If there are no catalogs None
+        is returned.
     """
-    Identifies matching sources between two catalogs (dual band match) based on
-    their sky coordinates.
-    The function compares two catalogs of detected sources and identifies
-    matching sources within a given separation threshold. It then returns a
-    catalog with updated centroid information, including both the average
-    positions and maximum flux values for matched sources.
-
-    This function performs the following steps:
-    1. Ensures that both catalogs have the same observation ID.
-    2. Finds matching objects based on sky coordinates, using a separation threshold.
-    3. Computes the average positions (both in sky and pixel coordinates) for matched sources.
-    4. Updates the centroid catalog with new position information and additional source properties
-       (e.g., max flux, eccentricity).
-    5. Logs the update process with debugging information.
-
-    Parameters:
-    - t1 (Table): The first catalog containing detected sources.
-    - t2 (Table): The second catalog containing detected sources.
-    - separation (float, optional): The maximum separation (in arcseconds) to consider a match between sources.
-      Default is 20 arcseconds.
-    - plot (bool, optional): If `True`, generate a plot for visualizing the matched sources (this feature is not
-      implemented in the function).
-
-    Returns:
-    - Table: A catalog with updated centroid information, which includes the following columns:
-      - `sky_centroid`: Sky coordinates of the matched sources (in FK5 frame).
-      - `xcentroid`: Pixel coordinates of the matched sources.
-      - `ycentroid`: Pixel coordinates of the matched sources.
-      - `ncoords`: Number of coordinates used for averaging (always 2 for dual-band matches).
-      - `obs_max`: Observation ID corresponding to the maximum flux for each source.
-      - `max_value`: Maximum flux value for each matched source.
-      - `sky_centroid_dms`: Sky coordinates in HMS/DMS format.
-      - Additional columns for source properties, such as `eccentricity`, `elongation`, `ellipticity`, and `area`.
-
-    Raises:
-    - ValueError: If the observation IDs in the two catalogs do not match.
-
-    Example:
-    >>> find_dual_detections(catalog1, catalog2, separation=15)
-    """
-    logger = LOGGER
-    max_sep = separation*u.arcsec
-    stacked_centroids = None
-    # Ensure both catalogs have the same obsID
-    if t1.meta['obsID'] != t2.meta['obsID']:
-        raise ValueError("values for obsID are not the same")
-
-    obsID = t1.meta['obsID']
-    band1 = t1.meta['band']
-    band2 = t2.meta['band']
-    cat1 = t1['sky_centroid']
-    cat2 = t2['sky_centroid']
-    labelID = f"{obsID}_{band1}_{band2}"
-    logger.debug(f"Dual band match for: {labelID}")
-    logger.debug(f"N in cat1: {len(cat1)} cat2: {len(cat2)}")
-
-    # Find matching objects
-    idxcat1, idxcat2, d2d, _ = cat2.search_around_sky(cat1, max_sep)
-
-    # Proceed only if we have matches, otherwise return None
-    if len(idxcat1) == 0:
-        logger.info(f"*** No matches for: {labelID} ***")
+    if len(catalogs) == 0:
         return None
-    else:
-        logger.info(f"*** Found {len(idxcat1)} matches for {labelID} ***")
-
-    # Concatenate matched positions
-    xx_sky = np.array([t1[idxcat1]['sky_centroid'].ra.data, t2[idxcat2]['sky_centroid'].ra.data])
-    yy_sky = np.array([t1[idxcat1]['sky_centroid'].dec.data, t2[idxcat2]['sky_centroid'].dec.data])
-    xx_pix = np.array([t1[idxcat1]['xcentroid'].data, t2[idxcat2]['xcentroid'].data])
-    yy_pix = np.array([t1[idxcat1]['ycentroid'].data, t2[idxcat2]['ycentroid'].data])
-
-    # Get the average positions
-    xc_sky = np.mean(xx_sky, axis=0)
-    yc_sky = np.mean(yy_sky, axis=0)
-    xc_pix = np.mean(xx_pix, axis=0)
-    yc_pix = np.mean(yy_pix, axis=0)
-    ncoords = [2]*len(xc_sky)
-    tblidx = np.arange(len(xc_sky)) + 1
-
-    # Get the ids with max value
-    value_max = np.array([t1[idxcat1]['max_value'], t2[idxcat2]['max_value']])
-    obs_value = np.array([t1[idxcat1]['obs'], t2[idxcat2]['obs']])
-    max_value_max = value_max.max(axis=0)
-    idmax = value_max.argmax(axis=0)
-    obs_max = obs_value.T[0][idmax]
-
-    # We based our table on t1 and update with (some) averages with positions
-    stacked_centroids = t1[idxcat1]
-    # Before Update
-    logger.debug("Before Update")
-    t = stacked_centroids['label', 'xcentroid', 'ycentroid', 'sky_centroid_dms',
-                          'obs', 'obs_max', 'max_value',
-                          'eccentricity', 'elongation', 'ellipticity', 'area']
-    logger.debug(f"\n{t}\n")
-    # Update centroids with averages
-    # Create a Skycoord object
-    coords = SkyCoord(xc_sky, yc_sky, frame=FK5, unit='deg')
-    if 'index' not in stacked_centroids.colnames:
-        stacked_centroids.add_column(tblidx, name='index', index=0)
-    else:
-        stacked_centroids['index'] = tblidx
-    stacked_centroids['sky_centroid'] = coords
-    stacked_centroids['xcentroid'] = xc_pix
-    stacked_centroids['ycentroid'] = yc_pix
-    stacked_centroids['ncoords'] = ncoords
-    stacked_centroids['obs_max'] = obs_max
-    stacked_centroids['max_value'] = max_value_max
-    stacked_centroids['max_value'].info.format = '.2f'
-    stacked_centroids['xcentroid'].info.format = '.2f'
-    stacked_centroids['ycentroid'].info.format = '.2f'
-    stacked_centroids['sky_centroid_dms'] = stacked_centroids['sky_centroid'].to_string('hmsdms', precision=0)
-    stacked_centroids.add_index('index')
-    stacked_centroids.meta['band'] = f"{band1}_{band2}"
-
-    logger.debug("After Update[find_dual_detections]")
-    logger.debug("#### stacked_centroids ####")
-    t = stacked_centroids['label', 'xcentroid', 'ycentroid', 'sky_centroid_dms',
-                          'obs', 'obs_max', 'max_value', 'ncoords',
-                          'eccentricity', 'elongation', 'ellipticity', 'area']
-    logger.debug(f"\n{t}")
-    logger.debug("#### ---- ###")
-
-    return stacked_centroids
-
-
-def find_unique_centroids(table_centroids, separation=20, plot=False):
-    """
-    Finds unique centroids between multiple catalogs by matching objects within a given
-    separation threshold and stacking the resulting centroid information.
-
-    Parameters:
-    - table_centroids (dict): Dictionary where the keys are catalog labels and the values
-                               are the catalogs containing the centroid data.
-    - separation (float, optional): Maximum separation (arcseconds) to consider a match.
-                                    Default is 20.
-    - plot (bool, optional): If `True`, generate a plot (not implemented here). Default is `False`.
-
-    Returns:
-    - Table: A catalog with updated centroid information and matched sources, stacked across
-             all catalogs.
-    Notes:
-    - The function operates on multiple catalogs provided in the `table_centroids` dictionary.
-      It stacks matched centroids, averages their positions, and updates the catalog with the
-      resulting information. If objects are unmatched, they are appended to the stacked catalog.
-    """
-    logger = LOGGER
-    max_sep = separation*u.arcsec
-    stacked_centroids = None
-    labelIDs = list(table_centroids.keys())
-    if len(labelIDs) < 2:
-        logger.warning("Will not run find_unique_centroids() -- < 2 catalogs to match!")
-        logger.warning(f"labelIDs: {labelIDs}")
-        stacked_centroids = copy.deepcopy(table_centroids[labelIDs[0]])
-        stacked_centroids = check_index_ncoords_columns(stacked_centroids)
-        # Return the 1st and only element in the dictionary -- as the merged centroids
-        return stacked_centroids
-
-    for k in range(len(labelIDs)-1):
-        # Select current and next table IDs
-        label1 = labelIDs[k]
-        label2 = labelIDs[k+1]
-        logger.info(f"Doing: {k+1}/{len(labelIDs)-1}")
-
-        # Extract the catalogs (i.e. SkyCoord objects) for search_around_sky
-        # and make shorcuts of tables
-        # For k > 0 we used the stacked/combined catalog
-        if k == 0:
-            t1 = copy.deepcopy(table_centroids[label1])
-            cat1 = t1['sky_centroid']
-        else:
-            t1 = copy.deepcopy(stacked_centroids)
-            cat1 = t1['sky_centroid']
-        t2 = copy.deepcopy(table_centroids[label2])
-        cat2 = t2['sky_centroid']
-
-        # Remove 'obs' from tables if present
-        if 'obs' in t1.columns:
-            t1.remove_column('obs')
-        if 'obs' in t2.columns:
-            t2.remove_column('obs')
-
-        # Find matching objects to avoid duplicates
-        idxcat1, idxcat2, d2d, _ = cat2.search_around_sky(cat1, max_sep)
-        # Define idxnew, the objects not matched in table2/cat2 that need to be appended
-        n2 = len(cat2)
-        idxall = np.arange(n2)
-        idxnew2 = np.delete(idxall, idxcat2)
-
-        # Only for the first iteration we append agaist t1, after that we use the output
-        if k == 0:
-            xx_sky = stack_cols_lists(t1['sky_centroid'].ra.data, t2['sky_centroid'].ra.data, idxcat1, idxcat2,)
-            yy_sky = stack_cols_lists(t1['sky_centroid'].dec.data, t2['sky_centroid'].dec.data, idxcat1, idxcat2)
-            xx_pix = stack_cols_lists(t1['xcentroid'].data, t2['xcentroid'].data, idxcat1, idxcat2)
-            yy_pix = stack_cols_lists(t1['ycentroid'].data, t2['ycentroid'].data, idxcat1, idxcat2)
-            value_max = stack_cols_lists(t1['max_value'].data, t2['max_value'].data, idxcat1, idxcat2, pad=True)
-            obs_max = stack_cols_lists(t1['obs_max'].data, t2['obs_max'].data, idxcat1, idxcat2, pad=True)
-            snr_max = stack_cols_lists(t1['snr_max'].data, t2['snr_max'].data, idxcat1, idxcat2, pad=True)
-            # If ncoords already exists in the columns we will stack them
-            if 'ncoords' in t1.columns and 'ncoords' in t2.columns:
-                ncoords = stack_cols_lists(t1['ncoords'].data, t2['ncoords'].data, idxcat1, idxcat2)
-        else:
-            xx_sky = stack_cols_lists(xx_sky, t2['sky_centroid'].ra.data, idxcat1, idxcat2)
-            yy_sky = stack_cols_lists(yy_sky, t2['sky_centroid'].dec.data, idxcat1, idxcat2)
-            xx_pix = stack_cols_lists(xx_pix, t2['xcentroid'].data, idxcat1, idxcat2)
-            yy_pix = stack_cols_lists(yy_pix, t2['ycentroid'].data, idxcat1, idxcat2)
-            value_max = stack_cols_lists(value_max, t2['max_value'].data, idxcat1, idxcat2, pad=True)
-            obs_max = stack_cols_lists(obs_max, t2['obs_max'].data, idxcat1, idxcat2, pad=True)
-            snr_max = stack_cols_lists(snr_max, t2['snr_max'].data, idxcat1, idxcat2, pad=True)
-            if 'ncoords' in t2.columns:
-                ncoords = stack_cols_lists(ncoords, t2['ncoords'].data, idxcat1, idxcat2)
-
-        # Here we update the max_values and obs_max label
-        # We make them np.array so we can operate on them
-        value_max = np.array(value_max)
-        snr_max = np.array(snr_max)
-        obs_max = np.array(obs_max)
-        idmax = value_max.argmax(axis=1)
-        # We store them back in the same arrays/lists
-        value_max = value_max.max(axis=1)
-        obs_max = [obs_max[i][idmax[i]] for i in range(len(idmax))]
-        snr_max = [snr_max[i][idmax[i]] for i in range(len(idmax))]
-
-        # If we have unmatched objects in cat2 (i.e. idxnew has elements), we append these
-        if len(idxnew2) > 0:
-            # inherit metadata from t1
-            new_stack = vstack([t1, t2[idxnew2]])
-            stacked_centroids = new_stack
-            logger.info(f"{label1}-{label2} Stacked")
-        else:
-            stacked_centroids = t1
-            logger.info(f"{label1}-{label2} No new positions to add")
-
-        # Get the average positions so far
-        xc_pix = mean_list_of_list(xx_pix)
-        yc_pix = mean_list_of_list(yy_pix)
-        xc_sky = mean_list_of_list(xx_sky)
-        yc_sky = mean_list_of_list(yy_sky)
-        # Update the number of coordinates points we have so far
-        if 'ncoords' in t1.columns and 'ncoords' in t2.columns:
-            ncoords = [sum(x) for x in ncoords]
-        else:
-            ncoords = [len(x) for x in xx_pix]
-        tblidx = np.arange(len(xc_sky)) + 1
-
-        # Update centroids with averages
-        # Create a Skycoord object
-        coords = SkyCoord(xc_sky, yc_sky, frame=FK5, unit='deg')
-        if 'index' not in stacked_centroids.colnames:
-            stacked_centroids.add_column(tblidx, name='index', index=0)
-        else:
-            stacked_centroids['index'] = tblidx
-
-        stacked_centroids['sky_centroid'] = coords
-        stacked_centroids['xcentroid'] = xc_pix
-        stacked_centroids['ycentroid'] = yc_pix
-        stacked_centroids['ncoords'] = ncoords
-        stacked_centroids['obs_max'] = obs_max
-        stacked_centroids['snr_max'] = snr_max
-        stacked_centroids['max_value'] = value_max
-        stacked_centroids['max_value'].info.format = '.2f'
-        stacked_centroids['xcentroid'].info.format = '.2f'
-        stacked_centroids['ycentroid'].info.format = '.2f'
-        stacked_centroids['snr_max'].info.format = '.2f'
-        stacked_centroids.add_index('index')
-        logger.debug(f"centroids Done for {label1}")
-
-    return stacked_centroids
-
-
-def find_repeating_sources(cat, separation=20, plot=False, outdir=None):
-    """
-    Matches sources in consecutive catalogs that appear in at least two consecutive catalogs,
-    with a specified separation threshold, and calculates the mean centroid of matched sources.
-
-    Parameters:
-    - cat (dict): Dictionary containing catalogs in astropy Table format, with each key
-                  corresponding to a catalog of sources.
-    - separation (float, optional): Maximum separation (arcseconds) to consider a match.
-                                    Default is 20.
-    - plot (bool, optional): If `True`, generates plots for the matched sources and saves them
-                              in the specified output directory. Default is `False`.
-    - outdir (str, optional): Directory to save the plot if `plot=True`. Default is `None`.
-
-    Returns:
-    - dict: A dictionary where the keys are concatenated labels of the matched catalogs
-            (e.g., 'scan1_scan2') and the values are astropy Tables with matched centroid positions
-            and other related information.
-
-    Notes:
-    - The function compares consecutive catalogs and finds sources with positions that match
-      within the specified separation threshold. It calculates the mean centroid for each matched
-      pair of catalogs, storing the results in a dictionary. If `plot` is enabled, plots are generated
-      showing the matched sources and their positions.
-    """
-
-    max_sep = separation*u.arcsec
-    table_centroids = {}  # Table with centroids
-    scans = list(cat.keys())
-    logger = LOGGER
-    logger.info("++++++++ Starting Match Loop for repeating sources ++++++++++")
-    logger.info(f"scans: {scans}")
-    for k in range(len(scans)-1):
-        logger.info(scans[k])
-        scan1 = scans[k]
-        scan2 = scans[k+1]
-        cat1 = cat[scan1]['sky_centroid']
-        cat2 = cat[scan2]['sky_centroid']
-        n1 = len(cat[scan1])
-        n2 = len(cat[scan2])
-        labelID = f"{scan1}_{scan2}"
-        logger.info("==============================")
-        logger.info(f"Doing {scan1} vs {scan2}")
-        logger.info(f"N in cat1: {n1} cat2: {n2}")
-
-        # Match method using search_around_sky
-        idxcat1, idxcat2, d2d, _ = cat2.search_around_sky(cat1, max_sep)
-        logger.info(f"N matches: {len(idxcat1)} -- {len(idxcat2)}")
-
-        if len(idxcat1) == 0:
-            logger.info(f"*** No matches for: {labelID} ***")
-            continue
-
-        # Get the mean centroid from the matched catalogs
-        xx_sky = np.array([cat[scan1][idxcat1]['sky_centroid'].ra, cat[scan2][idxcat2]['sky_centroid'].ra])
-        yy_sky = np.array([cat[scan1][idxcat1]['sky_centroid'].dec, cat[scan2][idxcat2]['sky_centroid'].dec])
-        xx_pix = np.array([cat[scan1][idxcat1]['xcentroid'], cat[scan2][idxcat2]['xcentroid']])
-        yy_pix = np.array([cat[scan1][idxcat1]['ycentroid'], cat[scan2][idxcat2]['ycentroid']])
-        xc_sky = np.mean(xx_sky, axis=0)
-        yc_sky = np.mean(yy_sky, axis=0)
-        xc_pix = np.mean(xx_pix, axis=0)
-        yc_pix = np.mean(yy_pix, axis=0)
-        ncoords = [2]*len(xc_sky)
-        label_col = [labelID]*len(xc_sky)
-        tblidx = np.arange(len(xc_sky)) + 1
-
-        # Get the ids with max value
-        max_value = np.array([cat[scan1][idxcat1]['max_value'], cat[scan2][idxcat2]['max_value']])
-        obs_value = np.array([cat[scan1][idxcat1]['obs'], cat[scan2][idxcat2]['obs']])
-        max_value_max = max_value.max(axis=0)
-        idmax = max_value.argmax(axis=0)
-        obs_max = obs_value.T[0][idmax]
-
-        # Create a Skycoord object
-        coords = SkyCoord(xc_sky, yc_sky, frame=FK5, unit='deg')
-        table_centroids[labelID] = Table([tblidx, label_col, coords, xc_pix, yc_pix, obs_max, max_value_max, ncoords],
-                                         names=('index', 'labelID', 'sky_centroid', 'xcentroid', 'ycentroid',
-                                                'obs_max', 'max_value', 'ncoords'))
-        table_centroids[labelID]['xcentroid'].info.format = '.2f'
-        table_centroids[labelID]['ycentroid'].info.format = '.2f'
-        table_centroids[labelID]['max_value'].info.format = '.2f'
-        logger.info(f"centroids Done for: {labelID}")
-        print(table_centroids[labelID])
-        if plot:
-            plot_name = os.path.join(outdir, f"{labelID}_match")
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
-
-            # Set limits for centroids
-            xmin = min(cat[scan1]['xcentroid'].min(), cat[scan2]['xcentroid'].min())
-            ymin = min(cat[scan1]['ycentroid'].min(), cat[scan2]['ycentroid'].min())
-            xmax = max(cat[scan1]['xcentroid'].max(), cat[scan2]['xcentroid'].max())
-            ymax = max(cat[scan1]['ycentroid'].max(), cat[scan2]['ycentroid'].max())
-            dx = 0.2*(xmax-xmin)
-            dy = 0.2*(ymax-ymin)
-            xmin = xmin-dx
-            xmax = xmax+dx
-            ymin = ymin-dy
-            ymax = ymax+dy
-
-            x = cat[scan1]['xcentroid']
-            y = cat[scan1]['ycentroid']
-            ax1.scatter(x, y, marker='o', c='red')
-            ax1.set_xlabel('x[pixels]')
-            ax1.set_ylabel('y[pixels]')
-            ax1.set_xlim(xmin, xmax)
-            ax1.set_ylim(ymin, ymax)
-            ax1.set_title(f"{scan1}")
-
-            x = cat[scan2]['xcentroid']
-            y = cat[scan2]['ycentroid']
-            ax2.scatter(x, y, marker='o', c='blue')
-            ax2.set_xlabel('x[pixels]')
-            ax2.set_ylabel('y[pixels]')
-            ax2.set_xlim(xmin, xmax)
-            ax2.set_ylim(ymin, ymax)
-            ax2.set_title(f"{scan2}")
-
-            x = table_centroids[labelID]['xcentroid']
-            y = table_centroids[labelID]['ycentroid']
-            ax3.scatter(x, y, marker='o', c='k')
-            ax3.set_xlabel('x[pixels]')
-            ax3.set_ylabel('y[pixels]')
-            ax3.set_xlim(xmin, xmax)
-            ax3.set_ylim(ymin, ymax)
-            ax3.set_title(f"{scan1} - {scan2}")
-            plt.savefig(f"{plot_name}.pdf")
-            plt.close()
-
-    logger.info("Done Matching Loop for repeating sources")
-    logger.info("+++++++++++++++++++++++++++++")
-    return table_centroids
-
-
-def stack_cols_lists(c1, c2, ix1, ix2, pad=False, noNew=False):
-
-    """
-    Custom function to stack two one-dimensional columns containing lists.
-    The function combines elements from two columns (`c1` and `c2`) based on
-    matching indices (`ix1` and `ix2`) and allows for additional customization
-    such as padding or skipping new elements.
-
-    Parameters:
-    - c1 (list or 1D numpy array): The first list (or list of lists) to be processed.
-    - c2 (list or 1D numpy array): The second list (or list of lists) to be processed.
-    - ix1 (list of int): List of indices of `c1` that match with `c2`.
-    - ix2 (list of int): List of indices of `c2` that match with `c1`.
-
-    Options:
-    - pad (bool, optional): If `True`, pads lists with a single element to have two elements.
-      Default is `False`.
-    - noNew (bool, optional): If `True`, prevents the addition of new elements from `c2` to `c1`.
-      Default is `False`.
-
-    Returns:
-    - list: A list where elements of `c1` and `c2` are stacked together based on the matching indices.
-            Each element is guaranteed to be a list, even if it originally wasn't.
-    Raises:
-    - Exception: If the lengths of `ix1` and `ix2` do not match, an exception is raised.
-    - Exception: If `c1` or `c2` cannot be cast to a list.
-
-    Notes:
-    - The function first augments the lists in `c1` with the matching elements from `c2` based on `ix1` and `ix2`.
-    - If `noNew` is `True`, the function stops after augmenting the lists and does not append any new items from `c2`.
-    - If `pad` is `True`, lists with only one element will be padded to contain two identical elements.
-    """
-
-    # Get elements that are not in c1 but not c2
-    ixall1 = np.arange(len(c1))
-    ixnew1 = np.delete(ixall1, ix1)
-    # Get elements that are not in c2 but not c1
-    ixall2 = np.arange(len(c2))
-    ixnew2 = np.delete(ixall2, ix2)
-    nidx = len(ix1)
-
-    if len(ix1) != len(ix2):
-        raise Exception("ix1 and ix2 have different dimensions")
-
-    # Make sure that c1 and c2 are lists, if not we re-cast them as lists
-    if not isinstance(c1, list):
-        try:
-            c1 = list(c1)
-        except Exception as err:
-            raise Exception(f"Cannot cast c1 as list {err=}, {type(err)=}")
-    if not isinstance(c2, list):
-        try:
-            c2 = list(c2)
-        except Exception as err:
-            raise Exception(f"Cannot cast c2 as list {err=}, {type(err)=}")
-
-    # We will store the new list here as a list called "newlist"
-    # and make sure that the newlist elements are also lists:
-    newlist = [c if isinstance(c, list) else [c] for c in c1]
-
-    # Step 1, we stack the elements of c1, c2, by indexing (ix1, ix2) and
-    # we want to augment c1 lists with new matches (ix2) from c2
-    for k in range(nidx):
-        i = ix1[k]
-        j = ix2[k]
-        newlist[i].append(c2[j])
-
-    # If we only want the ones matches (not adding new objects, we stop here)
-    if noNew:
-        return newlist
-
-    # Step 2, we want to append new elememts in c2 to existing c1
-    LOGGER.debug(f"ixnew1: {ixnew1}")
-    if pad:
-        for k in ixnew1:
-            c = newlist[k][0]
-            newlist[k] = [c, c]
-
-    LOGGER.debug(f"ixnew2: {ixnew2}")
-    for k in ixnew2:
-        c = c2[k]
-        if pad:
-            newlist.append([c, c])
-            LOGGER.debug(f"padding ixnew2: {len(newlist)} {newlist[-1]}")
-        else:
-            newlist.append([c])
-    return newlist
-
-
-def mean_list_of_list(list, np_array=True):
-    """
-    Compute the mean of each sublist in a list of lists, and optionally return
-    the result as a NumPy array.
-
-    Parameters:
-    - list (list of list-like objects): A list of lists (or arrays) for which the
-      mean of each sublist will be computed.
-    - np_array (bool, optional): If `True`, the result is returned as a NumPy array.
-      If `False`, a list of means is returned. Default is `True`.
-
-    Returns:
-    - list or numpy.ndarray: The mean of each sublist. If `np_array` is `True`,
-      a NumPy array is returned; otherwise, a list is returned.
-
-    Example:
-    >>> mean_list_of_list([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-    array([2.0, 5.0, 8.0])
-
-    Notes:
-    - Each sublist in the input list is converted into a NumPy array before
-      computing the mean.
-    - The function will return a single mean value for each sublist.
-    """
-    u = [np.array(x).mean() for x in list]
-    if np_array:
-        u = np.array(u)
-    return u
-
-
-def max_list_of_list(list, np_array=True):
-    """
-    Compute the maximum value of each sublist in a list of lists,
-    and optionally return the result as a NumPy array.
-
-    Parameters:
-    - list (list of list-like objects): A list of lists (or arrays) for which
-      the maximum value of each sublist will be computed.
-    - np_array (bool, optional): If `True`, the result is returned as a NumPy array.
-      If `False`, a list of maximum values is returned. Default is `True`.
-
-    Returns:
-    - list or numpy.ndarray: The maximum value of each sublist. If `np_array` is `True`,
-      a NumPy array is returned; otherwise, a list is returned.
-
-    Example:
-    >>> max_list_of_list([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-    array([3, 6, 9])
-
-    Notes:
-    - Each sublist in the input list is converted into a NumPy array before computing
-      the maximum value.
-    - The function will return the maximum value for each sublist.
-    """
-
-    max_val = [np.array(x).max() for x in list]
-    if np_array:
-        max_val = np.array(max_val)
-    return max_val
+    # Create an empty catalog to store unique sources with the same length as
+    # the original catalog. This allows adding new rows without reallocation.
+    full_length = sum(len(catalog) for catalog in catalogs)
+    unique = QTable()
+    # The index is 1-based.
+    unique["index"] = np.arange(full_length, dtype=np.int64) + 1
+    unique["ncoords"] = np.full(full_length, -1, dtype=np.int64)
+    unique["sky_centroid"] = SkyCoord(
+        np.zeros(full_length) * u.deg, np.zeros(full_length) * u.deg, frame=FK5,
+    )
+    unique_count = 0
+    source_ids = [
+        np.full(len(catalog), -1, dtype=np.int64) for catalog in catalogs
+    ]
+
+    for source_id, catalog in zip(source_ids, catalogs):
+        # Do not store the KD tree because matching does not occur with the same
+        # SkyCoord object again.
+        previous_search, current_search, distances, _ = search_around_sky(
+            unique["sky_centroid"][:unique_count],
+            catalog["sky_centroid"],
+            max_separation * u.arcsec,
+            storekdtree=False,
+        )
+
+        # Map the matched indicies to unique indices only.
+        unique_p, inv_p = np.unique(previous_search, return_inverse=True)
+        unique_c, inv_c = np.unique(current_search, return_inverse=True)
+
+        # Set up the cost matrix to maximize count then minimize cost.
+        big = np.sum(distances.value) + 1
+        adj_matrix = np.full((unique_p.size, unique_c.size), big)
+        adj_matrix[inv_p, inv_c] = distances.value
+
+        ind_p, ind_c = linear_sum_assignment(adj_matrix)
+
+        # Only include sources that were matched to another source.
+        matched = adj_matrix[ind_p, ind_c] < big
+        ind_p = ind_p[matched]
+        ind_c = ind_c[matched]
+
+        # Map the compressed indices back to original indices.
+        previous_match = unique_p[ind_p]
+        current_match = unique_c[ind_c]
+
+        # Update matches in sources.
+        source_id[current_match] = unique["index"][previous_match]
+
+        # Convert coordinates to cartesian for finding the mean.
+        # Assume that coordinates are in the same frame.
+        previous_coord = unique["sky_centroid"][previous_match].cartesian
+        current_coord = catalog["sky_centroid"][current_match].cartesian
+        # Find the weighted mean based on the number of detected coordinates so
+        # that all coordinates are weighted equally.
+        mean_coord = SkyCoord(
+            (
+                current_coord * catalog["ncoords"][current_match] +
+                previous_coord * unique["ncoords"][previous_match]
+            ) / (
+                catalog["ncoords"][current_match] +
+                unique["ncoords"][previous_match]
+            ),
+            frame=FK5,
+        )
+        # Ignore the distance of the coordinates since they were projected onto
+        # a unit sphere but we don't want any distance.
+        unique["sky_centroid"][previous_match] = SkyCoord(
+            mean_coord.ra, mean_coord.dec, frame=FK5
+        )
+        unique["ncoords"][previous_match] += catalog["ncoords"][current_match]
+
+        # Add new unique sources.
+        new_count = len(catalog) - len(current_match)
+        is_new = np.ones(len(catalog), dtype=bool)
+        is_new[current_match] = False
+        unique["sky_centroid"][unique_count : unique_count + new_count] = (
+            catalog["sky_centroid"][is_new]
+        )
+        unique["ncoords"][unique_count : unique_count + new_count] = (
+            catalog["ncoords"][is_new]
+        )
+        source_id[is_new] = (
+            unique["index"][unique_count : unique_count + new_count]
+        )
+        unique_count += new_count
+
+    # Filter the empty rows that were overallocated.
+    unique = unique[:unique_count]
+
+    # Create a single stacked table of all catalogs.
+    # If there is only one catalog, we have to make a copy since vstack does not
+    # make a copy as of astropy 7.2.0. See #18910.
+    stacked = vstack(catalogs) if len(catalogs) > 1 else catalogs[0].copy()
+    stacked["index"] = np.concatenate(source_ids)
+    stacked_grouped = stacked.group_by("index")
+
+    # Aggregate columns.
+    for column in CATALOG_COLUMNS:
+        if column.aggregate == "mean":
+            values = [
+                np.average(group[column.name], weights=group["ncoords"])
+                for group in stacked_grouped.groups
+            ]
+            unique[column.name] = np.array(values)
+
+    # Get the index of the maximum value within each group.
+    max_index = [
+        start + source_group["max_value"].argmax()
+        for start, source_group in zip(
+            stacked_grouped.groups.indices[:-1], stacked_grouped.groups
+        )
+    ]
+    for column in CATALOG_COLUMNS:
+        if column.aggregate == "max_source":
+            unique[column.name] = stacked_grouped[column.name][max_index]
+
+    unique["sky_centroid_dms"] = unique["sky_centroid"].to_string(
+        "hmsdms", precision=0
+    )
+    return unique
 
 
 def compute_rms2D(data, mask=None, box=200, filter_size=(3, 3), sigmaclip=None):
@@ -1788,15 +1420,12 @@ def detect_with_photutils(data, wgt=None, mask=None, nsigma_thresh=3.5, npixels=
         LOGGER.info("No sources found in astropy/segm, returning (None, None)")
         return None, None
     cat = SourceCatalog(data, segm, error=wgt, mask=mask, wcs=wcs, progress_bar=True)
-    # Make sure these are added.
-    cat.default_columns.append('elongation')
-    cat.default_columns.append('ellipticity')
 
     LOGGER.info(f"detect_with_photutils runtime: {elapsed_time(t0)}")
     LOGGER.info(f"Found: {len(cat)} objects")
 
     # Nicer formatting
-    tbl = cat.to_table()
+    tbl = cat.to_table([col.name for col in CATALOG_COLUMNS if col.photutils])
     tbl['xcentroid'].info.format = '.2f'  # optional format
     tbl['ycentroid'].info.format = '.2f'
     tbl['max_value'].info.format = '.2f'
