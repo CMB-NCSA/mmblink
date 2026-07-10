@@ -409,17 +409,20 @@ def plot_stamps_lc(images_dict, headers_dict, lightcurve_dict,
         i2 = np.where(selected_IDs <= obsmax)[0][-1] + 1  # need to add +1 to slice
         n_images = len(selected_IDs[i1:i2])
 
-    # Horizontal (4%) and vertical (15%) space for margins
-    hmargin = 0.04
-    vmargin = 0.15
-    height_ratios = [1]*n_bands
+    # Left, right, top and bottom space for margins.
+    lmargin = 0.20
+    rmargin = 0.15
+    tmargin = 0.15
+    bmargin = 0.1
+    height_ratios = [1.0]*n_bands
     height_ratios.append(0.2)   # space between thumbnails and lightcurve
-    height_ratios.append(n_bands)
-    hscale = (1-2*hmargin)/(1-2*vmargin)
-    fig = plt.figure(figsize=(n_images, (n_bands*2)*hscale))
+    height_ratios.append(float(n_bands))
+    hscale = (1 - lmargin - rmargin) / (1 - tmargin - bmargin)
+    fig_scale = 1.5
+    fig = plt.figure(figsize=(n_images * fig_scale, n_bands * hscale * 2 * fig_scale))
     gs = fig.add_gridspec(n_bands+2, n_images, height_ratios=height_ratios,
-                          left=hmargin, right=1-hmargin,
-                          top=1-vmargin, bottom=vmargin,
+                          left=lmargin, right=1 - rmargin,
+                          top=1-tmargin, bottom=bmargin,
                           hspace=0.05*hscale, wspace=0)
     axs = gs.subplots(sharex='col', sharey='row')
 
@@ -463,7 +466,6 @@ def plot_stamps_lc(images_dict, headers_dict, lightcurve_dict,
     ax0 = fig.add_subplot(gs[n_bands, :])
     ax0.set_axis_off()
     ax1 = fig.add_subplot(gs[-1, :])
-    fig.subplots_adjust(bottom=0.1)
 
     fcolor = {}
     fcolor['90GHz'] = 'red'
@@ -502,10 +504,10 @@ def plot_stamps_lc(images_dict, headers_dict, lightcurve_dict,
     ax1.yaxis.set_major_formatter(formatter)
 
     fig.suptitle(f"{id} | SN={snr:.1f}")
-    if show:
-        plt.show()
     du.create_dir(outdir)
     file = os.path.join(outdir, f"{id}.{format}")
     fig.savefig(file)
+    if show:
+        plt.show()
     logger.info(f"Plot saved to file: {file}")
     plt.close(fig)
