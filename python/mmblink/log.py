@@ -30,12 +30,12 @@ def configure_logging(
     format : str, optional
         Format string for the logged output. If not specified,
         DEFAULT_LOG_FORMAT is used.
-    format : str, optional
+    date_format : str, optional
         Format string for the date. If not specified, DEFAULT_DATE_FORMAT is
         used.
     filename : str, optional
         Filename to output logs. If not specified, no file handler is added.
-    name : str, optional
+    logger_name : str, optional
         Name of the logger to modify. If not specified, the root logger is
         modified.
 
