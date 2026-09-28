@@ -310,12 +310,14 @@ class g3detect:
             Re-raises any exception raised by a file, adding a note of the
             failing file.
         """
-        if self.config.np != 1:
+        if self.config.np > 1 or self.config.np == 0:
             logger.info("Running detection jobs in parallel")
             return self.detect_all_sources_parallel()
-        else:
+        elif self.config.np == 1:
             logger.info("Running detection jobs serially")
             return self.detect_all_sources_serial()
+        else:
+            raise ValueError("np must be >= 0")
 
     def detect_all_sources_serial(self):
         """Find detections across all files in order with modular loading.
