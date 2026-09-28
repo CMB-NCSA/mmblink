@@ -124,9 +124,9 @@ def parallel_process_log():
     finally:
         # Restore original root handlers.
         root_logger.removeHandler(queue_handler)
+        listener.stop()
         for handler in root_handlers:
             root_logger.addHandler(handler)
-        listener.stop()
         log_queue.close()
         log_queue.join_thread()
 
