@@ -11,14 +11,11 @@ import datetime
 import errno
 import json
 import logging
-from logging.handlers import RotatingFileHandler
-import multiprocessing
 from multiprocessing.managers import DictProxy
 import os
 import psutil
 import shutil
 import subprocess
-import sys
 from tempfile import mkdtemp
 import time
 import warnings
@@ -40,8 +37,7 @@ core_G3Units_rad = 1
 # To avoid header warning from astropy
 warnings.filterwarnings('ignore', category=AstropyWarning, append=True)
 
-# Logger
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # Naming template
 PREFIX = 'SPT3G'
@@ -52,59 +48,6 @@ BASE_OUTNAME = "{objID}"
 BASEDIR_OUTNAME = "{outdir}/{objID}"
 FILETYPE_EXT = {'passthrough': 'psth', 'filtered': 'fltd', 'None': ''}
 FITS_LC_OUTNAME = "{outdir}/lightcurve_{filter}_{filetype_ext}.{ext}"
-
-
-def configure_logger(logger, logfile=None, level=logging.NOTSET, log_format=None, log_format_date=None):
-    """
-    Configure an existing logger
-    """
-    # Define formats
-    if log_format:
-        FORMAT = log_format
-    else:
-        FORMAT = '[%(asctime)s.%(msecs)03d][%(levelname)s][%(name)s][%(funcName)s] %(message)s'
-    if log_format_date:
-        FORMAT_DATE = log_format_date
-    else:
-        FORMAT_DATE = '%Y-%m-%d %H:%M:%S'
-    formatter = logging.Formatter(FORMAT, FORMAT_DATE)
-
-    # Need to set the root logging level as setting the level for each of the
-    # handlers won't be recognized unless the root level is set at the desired
-    # appropriate logging level. For example, if we set the root logger to
-    # INFO, and all handlers to DEBUG, we won't receive DEBUG messages on
-    # handlers.
-    logger.setLevel(level)
-
-    handlers = []
-    # Set the logfile handle if required
-    if logfile:
-        fh = RotatingFileHandler(logfile, maxBytes=2000000, backupCount=10)
-        fh.setFormatter(formatter)
-        fh.setLevel(level)
-        handlers.append(fh)
-        logger.addHandler(fh)
-
-    # Set the screen handle
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(formatter)
-    sh.setLevel(level)
-    handlers.append(sh)
-    logger.addHandler(sh)
-
-    return
-
-
-def create_logger(logfile=None, level=logging.NOTSET, log_format=None, log_format_date=None):
-    """
-    Simple logger that uses configure_logger()
-    """
-    logger = logging.getLogger(__name__)
-    configure_logger(logger, logfile=logfile, level=level,
-                     log_format=log_format, log_format_date=log_format_date)
-    logging.basicConfig(handlers=logger.handlers, level=level)
-    logger.propagate = False
-    return logger
 
 
 def elapsed_time(t1, verb=False):
@@ -124,7 +67,7 @@ def elapsed_time(t1, verb=False):
     t2 = time.time()
     stime = "%dm %2.2fs" % (int((t2-t1)/60.), (t2-t1) - 60*int((t2-t1)/60.))
     if verb:
-        print("Elapsed time: {}".format(stime))
+        logger.info("Elapsed time: {}".format(stime))
     return stime
 
 
@@ -196,7 +139,7 @@ def update_wcs_matrix(header, x0, y0, proj='ZEA'):
             h.delete(k)
         h['CRPIX1'] = CRPIX1
         h['CRPIX2'] = CRPIX2
-        LOGGER.debug(f"Update to CRPIX1:{CRPIX1}, CRPIX2:{CRPIX2}")
+        logger.debug(f"Update to CRPIX1:{CRPIX1}, CRPIX2:{CRPIX2}")
 
     else:
         raise NameError(f"Projection: {proj} not implemented")
@@ -327,7 +270,7 @@ def get_headers_hdus(filename):
 
         # Case 2 -- files without EXTNAME
         if len(header) < 1:
-            LOGGER.debug("Getting EXTNAME by compression")
+            logger.debug("Getting EXTNAME by compression")
             if is_compressed:
                 sci_hdu = 1
                 wgt_hdu = 2
@@ -341,30 +284,14 @@ def get_headers_hdus(filename):
                 header['WGT'] = fits[wgt_hdu].read_header()
                 hdu['WGT'] = wgt_hdu
             except IOError:
-                LOGGER.warning(f"No WGT HDU for: {filename}")
+                logger.warning(f"No WGT HDU for: {filename}")
     fits.close()
     return header, hdu
 
 
-def get_NP(MP):
-
-    """ Get the number of processors in the machine
-    if MP == 0, use all available processor
-    """
-    # For it to be a integer
-    MP = int(MP)
-    if MP == 0:
-        NP = int(multiprocessing.cpu_count())
-    elif isinstance(MP, int):
-        NP = MP
-    else:
-        raise ValueError('MP is wrong type: %s, integer type' % MP)
-    return NP
-
-
 def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
                objID=None, xsize=1.0, ysize=1.0, units='arcmin', get_lightcurve=False,
-               prefix=PREFIX, outdir=None, clobber=True, logger=None, counter='',
+               prefix=PREFIX, outdir=None, clobber=True, counter='',
                get_uniform_coverage=False, nofits=False,
                stage=False, stage_prefix='spt-dummy', obsid_names=False):
 
@@ -406,8 +333,6 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
         The path for the output directory
     clobber: Bool
         Overwrite file if they exist
-    logger: logging object
-        Optional logging object
     counter: string
         Optional counter to pass on for tracking flow
     get_uniform_coverage: bool
@@ -419,8 +344,6 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
 
     # global timer for function
     t1 = time.time()
-    if not logger:
-        logger = LOGGER
 
     if not outdir:
         outdir = os.getcwd()
@@ -510,7 +433,7 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
     # Check for object=None on yearly maps
     if object == 'None' and obsid.find('yearly') != -1:
         object = 'yearly'
-        LOGGER.warning(f"Updating field to: {object}")
+        logger.warning(f"Updating field to: {object}")
 
     # The extension to use for FILETYPE
     filetype_ext = FILETYPE_EXT[filetype]
@@ -568,14 +491,14 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
 
         # Check if in field extent
         if get_uniform_coverage and not in_uniform_coverage(ra[k], dec[k], object):
-            LOGGER.warning(f"Rejected {objID[k]} (RA,DEC):{ra[k]},{dec[k]} outside field extent")
+            logger.warning(f"Rejected {objID[k]} (RA,DEC):{ra[k]},{dec[k]} outside field extent")
             # rejected_ids.append(objID[k])
             continue
 
         # Make sure the (x0,y0) is contained within the image
         if x0 < 0 or y0 < 0 or x0 > NAXIS1 or y0 > NAXIS2:
-            LOGGER.warning(f"Rejected {objID[k]} (RA,DEC):{ra[k]},{dec[k]} outside {filename}")
-            LOGGER.warning(f"Rejected {objID[k]} (x0,y0):{x0},{y0} > {NAXIS1},{NAXIS2}")
+            logger.warning(f"Rejected {objID[k]} (RA,DEC):{ra[k]},{dec[k]} outside {filename}")
+            logger.warning(f"Rejected {objID[k]} (x0,y0):{x0},{y0} > {NAXIS1},{NAXIS2}")
             # rejected_ids.append(objID[k])
             continue
 
@@ -590,10 +513,10 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
         if x2 > NAXIS1:
             x2 = NAXIS1
 
-        LOGGER.debug(f"Working on object:{k} -- {objID[k]}")
-        LOGGER.debug(f"Found naxis1,naxis2: {naxis1},{naxis2}")
-        LOGGER.debug(f"Found x1,x2: {x1},{x2}")
-        LOGGER.debug(f"Found y1,y2: {y1},{y2}")
+        logger.debug(f"Working on object:{k} -- {objID[k]}")
+        logger.debug(f"Found naxis1,naxis2: {naxis1},{naxis2}")
+        logger.debug(f"Found x1,x2: {x1},{x2}")
+        logger.debug(f"Found y1,y2: {y1},{y2}")
 
         # Append data from (x0, y0) pixel for both extensions
         if get_lightcurve:
@@ -615,7 +538,7 @@ def fitscutter(filename, ra, dec, cutout_names, rejected_names, lightcurve,
 
         # Skip the fits part if notfits is true
         if nofits:
-            LOGGER.debug(f"Skipping FITS file creation for objID:{objID[k]} (RA,DEC):{ra[k]},{dec[k]}")
+            logger.debug(f"Skipping FITS file creation for objID:{objID[k]} (RA,DEC):{ra[k]},{dec[k]}")
             continue
 
         # Now we cut the fits stamp
@@ -710,13 +633,13 @@ def get_id_names(ra, dec, prefix):
 def get_size_on_disk(outdir, timeout=15):
     "Get the size of the outdir outputs"
     t0 = time.time()
-    LOGGER.info(f"Getting size_on_disk with timeout={timeout}s.")
+    logger.info(f"Getting size_on_disk with timeout={timeout}s.")
     try:
         size = subprocess.check_output(['du', '-sh', outdir], timeout=timeout).split()[0].decode('ascii')
     except subprocess.TimeoutExpired:
-        LOGGER.warning(f"Cannot get_size_on_disk, timeout after {timeout}s.")
+        logger.warning(f"Cannot get_size_on_disk, timeout after {timeout}s.")
         size = f"Timed out: {timeout} sec, too large to compute"
-    LOGGER.info(f"Done size_on_disk in: {elapsed_time(t0)}")
+    logger.info(f"Done size_on_disk in: {elapsed_time(t0)}")
     return size
 
 
@@ -742,7 +665,7 @@ def get_positions_idnames(args):
 def capture_job_metadata(args):
     """ Get more information abot this job for the manifest"""
 
-    LOGGER.info("Getting job metadata for manifest file")
+    logger.info("Getting job metadata for manifest file")
 
     # Get the ID names for each ra,dec pair and store them
     if args.objID is None:
@@ -795,7 +718,7 @@ def get_mean_date(date1, date2):
 def get_obs_dictionary(lightcurve):
     "Create a dictionary of obervations keyed to BAND and FILETYPE"
 
-    LOGGER.info("Creating dictionary with observations")
+    logger.info("Creating dictionary with observations")
     obs_dict = {}
     for obs in lightcurve:
         FILETYPE = lightcurve[obs]['FILETYPE']
@@ -813,10 +736,10 @@ def repack_lightcurve_band_filetype(lightcurve, id_names, obs_dict, BAND, FILETY
     "Repack the lightcurve dictionary keyed by objID"
 
     t0 = time.time()
-    LOGGER.info(f"Repacking lightcurve information for band: {BAND}, filetype: {FILETYPE}")
-    LOGGER.debug(f"Memory: {psutil.Process(os.getpid()).memory_info().rss / 1024 ** 3} Gb")
+    logger.info(f"Repacking lightcurve information for band: {BAND}, filetype: {FILETYPE}")
+    logger.debug(f"Memory: {psutil.Process(os.getpid()).memory_info().rss / 1024 ** 3} Gb")
     process = psutil.Process(os.getpid())
-    LOGGER.debug(f"Memory percent: {process.memory_percent()} %")
+    logger.debug(f"Memory percent: {process.memory_percent()} %")
 
     # Select only the observation for the BAND/FILETYPE combination
     observations = obs_dict[BAND][FILETYPE]
@@ -834,7 +757,7 @@ def repack_lightcurve_band_filetype(lightcurve, id_names, obs_dict, BAND, FILETY
         for obs in observations:
 
             if objID in lightcurve[obs]['rejected_ids']:
-                LOGGER.debug(f"Ignoring {objID} for {obs} -- rejected")
+                logger.debug(f"Ignoring {objID} for {obs} -- rejected")
                 continue
 
             OBSID = lightcurve[obs]['OBSID']
@@ -858,7 +781,7 @@ def repack_lightcurve_band_filetype(lightcurve, id_names, obs_dict, BAND, FILETY
                 flux_SCI.append(flux_sci)
             except KeyError:
                 flux_wgt = None
-                LOGGER.warning(f"NO flux_WGT - obs:{objID} date:{DATE_BEG} BAND:{BAND} FILETYPE: {FILETYPE}")
+                logger.warning(f"NO flux_WGT - obs:{objID} date:{DATE_BEG} BAND:{BAND} FILETYPE: {FILETYPE}")
 
         # Put everything into a main dictionary, only if we get any hits
         # since now zero weights have been removed, need to be smarter to
@@ -874,9 +797,9 @@ def repack_lightcurve_band_filetype(lightcurve, id_names, obs_dict, BAND, FILETY
             LC[objID]['flux_SCI'] = flux_SCI
             LC[objID]['flux_WGT'] = flux_WGT
 
-    LOGGER.info(f"Done Re-packed lightcurve for {BAND}/{FILETYPE} in: {elapsed_time(t0)}")
+    logger.info(f"Done Re-packed lightcurve for {BAND}/{FILETYPE} in: {elapsed_time(t0)}")
     if len(LC) == 0:
-        LOGGER.warning(f"Lightcurve for {BAND}/{FILETYPE} is empty -- will not write lightcurve table")
+        logger.warning(f"Lightcurve for {BAND}/{FILETYPE} is empty -- will not write lightcurve table")
     else:
         write_lightcurve_band_filetype(LC, BAND, FILETYPE, args)
     del lightcurve
@@ -892,7 +815,7 @@ def get_rejected_ids(args):
             id = item.split(', ')[2]
             if id not in rejected_ids:
                 rejected_ids.append(id)
-    LOGGER.info(f"Found {len(rejected_ids)} objID to reject")
+    logger.info(f"Found {len(rejected_ids)} objID to reject")
     return rejected_ids
 
 
@@ -902,12 +825,12 @@ def write_lightcurve_band_filetype(lc, BAND, FILETYPE, args):
     max_epochs = 15000  # this has maximum number of epochs as 15k for fits table format
     fits_file = get_lightcurveFitsName(BAND, FILETYPE, outdir=args.outdir)
 
-    # LOGGER.info(f"Writing lightcurve to: {fits_file}")
+    # logger.info(f"Writing lightcurve to: {fits_file}")
     # Nested dictionaries cannot be sliced, so going through pandas route :(
     # as well as re-orienting
     df = pandas.DataFrame.from_dict(lc, orient='index')
     dict = df.to_dict()
-    LOGGER.debug(f"Converted dictionary to pandas and back in: {elapsed_time(t0)}")
+    logger.debug(f"Converted dictionary to pandas and back in: {elapsed_time(t0)}")
     col1 = fits.Column(name='id', format='30A', array=np.array(list(dict['id'].values()), dtype=object))
     col2 = fits.Column(name='dates_ave', format=f'PD({max_epochs})',
                        array=np.array(list(dict['dates_ave'].values()), dtype=object), unit='days, MJD')
@@ -923,7 +846,7 @@ def write_lightcurve_band_filetype(lc, BAND, FILETYPE, args):
     hdu.header.set('BAND', BAND)
 
     hdu.writeto(fits_file, overwrite=True)
-    LOGGER.info(f"Wrote lightcurve file to: {fits_file} in: {elapsed_time(t0)}")
+    logger.info(f"Wrote lightcurve file to: {fits_file} in: {elapsed_time(t0)}")
 
 
 def write_lightcurve(args):
@@ -936,7 +859,7 @@ def write_lightcurve(args):
     with open(yaml_file, 'w') as lightcurve_file:
         lightcurve_file.write(comment)
         yaml.dump(args.lc, lightcurve_file, sort_keys=False, default_flow_style=False)
-    LOGGER.info(f"Wrote lightcurve file to: {yaml_file} in: {elapsed_time(t0)}")
+    logger.info(f"Wrote lightcurve file to: {yaml_file} in: {elapsed_time(t0)}")
 
 
 def write_manifest(args):
@@ -962,10 +885,10 @@ def write_manifest(args):
         else:
             manifest[key] = d[key]
     json_file = os.path.join(args.outdir, 'manifest.json')
-    LOGGER.info(f"writing manifest to: {json_file}")
+    logger.info(f"writing manifest to: {json_file}")
     with open(json_file, 'w') as manifest_file:
         json.dump(manifest, manifest_file, sort_keys=False, indent=6)
-    LOGGER.info(f"Wrote manifest file to: {json_file} in: {elapsed_time(t0)}")
+    logger.info(f"Wrote manifest file to: {json_file} in: {elapsed_time(t0)}")
 
 
 def in_uniform_coverage(ra, dec, field):
@@ -977,8 +900,8 @@ def in_uniform_coverage(ra, dec, field):
     ra_range = list(ra_range)
     dec_range = list(dec_range)
 
-    LOGGER.debug(f"RA:{ra}, DEC:{dec}")
-    LOGGER.debug(f"range: {ra_range},{dec_range}")
+    logger.debug(f"RA:{ra}, DEC:{dec}")
+    logger.debug(f"range: {ra_range},{dec_range}")
 
     # Check to see if it crosses RA=0
     if ra_range[0] > ra_range[1]:
@@ -996,10 +919,10 @@ def in_uniform_coverage(ra, dec, field):
     else:
         in_field = False
 
-    LOGGER.debug(f"crossRA0: {crossRA0}")
-    LOGGER.debug(f"RA:{ra}, DEC:{dec}")
-    LOGGER.debug(f"range: {ra_range},{dec_range}")
-    LOGGER.debug(f"in_field:{in_field}")
+    logger.debug(f"crossRA0: {crossRA0}")
+    logger.debug(f"RA:{ra}, DEC:{dec}")
+    logger.debug(f"range: {ra_range},{dec_range}")
+    logger.debug(f"in_field:{in_field}")
 
     return in_field
 
@@ -1317,12 +1240,12 @@ def get_field_name(field):
 def create_dir(dirname):
     "Safely attempt to create a folder"
     if not os.path.isdir(dirname):
-        LOGGER.info(f"Creating directory {dirname}")
+        logger.info(f"Creating directory {dirname}")
         try:
             os.makedirs(dirname, mode=0o755, exist_ok=True)
         except OSError as e:
             if e.errno != errno.EEXIST:
-                LOGGER.warning(f"Problem creating {dirname} -- proceeding with trepidation")
+                logger.warning(f"Problem creating {dirname} -- proceeding with trepidation")
 
 
 def stage_fitsfile(fitsfile, stage_prefix="spt", use_cp=False):
@@ -1331,11 +1254,11 @@ def stage_fitsfile(fitsfile, stage_prefix="spt", use_cp=False):
     """
     tmp_dir = mkdtemp(prefix=stage_prefix)
     fitsfile_copy = os.path.join(tmp_dir, os.path.basename(fitsfile))
-    LOGGER.info(f"Will stage: {fitsfile} --> {fitsfile_copy}")
+    logger.info(f"Will stage: {fitsfile} --> {fitsfile_copy}")
     # Make sure that the folder exists:
     create_dir(os.path.dirname(fitsfile_copy))
     if use_cp:
-        LOGGER.warning("Will use system copy call")
+        logger.warning("Will use system copy call")
         cmd = f"cp -pv {fitsfile} {fitsfile_copy}"
         os.system(cmd)
     else:
@@ -1344,10 +1267,10 @@ def stage_fitsfile(fitsfile, stage_prefix="spt", use_cp=False):
 
 
 def remove_staged_file(fitsfile):
-    LOGGER.info(f"Removing: {fitsfile}")
+    logger.info(f"Removing: {fitsfile}")
     os.remove(fitsfile)
     tmp_dir = os.path.dirname(fitsfile)
-    LOGGER.info(f"Removing tmp dir: {tmp_dir}")
+    logger.info(f"Removing tmp dir: {tmp_dir}")
     shutil.rmtree(tmp_dir)
 
 
@@ -1361,10 +1284,6 @@ if __name__ == "__main__":
 
     xsize = [10]*len(ra)
     ysize = [10]*len(ra)
-
-    # Create logger
-    create_logger()
-    logger = logging.getLogger(__name__)
 
     t0 = time.time()
     fitscutter(filename, ra, dec, xsize=xsize, ysize=ysize, units='arcmin',
