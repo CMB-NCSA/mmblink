@@ -43,33 +43,33 @@ PPRINT_KEYS = ['label', 'xcentroid', 'ycentroid', 'sky_centroid', 'sky_centroid_
 class ColumnDescription:
     name : str
     photutils : bool
-    aggregate : Literal["mean", "max_source", "other"]
+    aggregate : Literal["mean", "snr_max", "other"]
 
 CATALOG_COLUMNS = [
-    ColumnDescription("obs_max", False, "max_source"),
-    ColumnDescription("snr_max", False, "max_source"),
-    ColumnDescription("label", True, "max_source"),
+    ColumnDescription("obs_max", False, "snr_max"),
+    ColumnDescription("snr_max", False, "snr_max"),
+    ColumnDescription("label", True, "snr_max"),
     ColumnDescription("sky_centroid", True, "other"),
     ColumnDescription("xcentroid", True, "mean"),
     ColumnDescription("ycentroid", True, "mean"),
     ColumnDescription("ncoords", False, "other"),
-    ColumnDescription("bbox_xmin", True, "max_source"),
-    ColumnDescription("bbox_xmax", True, "max_source"),
-    ColumnDescription("bbox_ymin", True, "max_source"),
-    ColumnDescription("bbox_ymax", True, "max_source"),
-    ColumnDescription("area", True, "max_source"),
-    ColumnDescription("semimajor_sigma", True, "max_source"),
-    ColumnDescription("semiminor_sigma", True, "max_source"),
-    ColumnDescription("orientation", True, "max_source"),
-    ColumnDescription("eccentricity", True, "max_source"),
-    ColumnDescription("min_value", True, "max_source"),
-    ColumnDescription("max_value", True, "max_source"),
-    ColumnDescription("segment_flux", True, "max_source"),
-    ColumnDescription("segment_fluxerr", True, "max_source"),
-    ColumnDescription("kron_flux", True, "max_source"),
-    ColumnDescription("kron_fluxerr", True, "max_source"),
-    ColumnDescription("elongation", True, "max_source"),
-    ColumnDescription("ellipticity", True, "max_source"),
+    ColumnDescription("bbox_xmin", True, "snr_max"),
+    ColumnDescription("bbox_xmax", True, "snr_max"),
+    ColumnDescription("bbox_ymin", True, "snr_max"),
+    ColumnDescription("bbox_ymax", True, "snr_max"),
+    ColumnDescription("area", True, "snr_max"),
+    ColumnDescription("semimajor_sigma", True, "snr_max"),
+    ColumnDescription("semiminor_sigma", True, "snr_max"),
+    ColumnDescription("orientation", True, "snr_max"),
+    ColumnDescription("eccentricity", True, "snr_max"),
+    ColumnDescription("min_value", True, "snr_max"),
+    ColumnDescription("max_value", True, "snr_max"),
+    ColumnDescription("segment_flux", True, "snr_max"),
+    ColumnDescription("segment_fluxerr", True, "snr_max"),
+    ColumnDescription("kron_flux", True, "snr_max"),
+    ColumnDescription("kron_fluxerr", True, "snr_max"),
+    ColumnDescription("elongation", True, "snr_max"),
+    ColumnDescription("ellipticity", True, "snr_max"),
     ColumnDescription("sky_centroid_dms", False, "other"),
 ]
 
@@ -1142,15 +1142,17 @@ def find_unique_centroids(catalogs, *, max_separation):
             ]
             unique[column.name] = np.array(values)
 
-    # Get the index of the maximum value within each group.
+    # Get the index of the detection with the highest absolute value of
+    # SNR within each group. The absolute value is used so negative detections
+    # are ranked by significance.
     max_index = [
-        start + source_group["max_value"].argmax()
+        start + np.abs(source_group["snr_max"]).argmax()
         for start, source_group in zip(
             stacked_grouped.groups.indices[:-1], stacked_grouped.groups
         )
     ]
     for column in CATALOG_COLUMNS:
-        if column.aggregate == "max_source":
+        if column.aggregate == "snr_max":
             unique[column.name] = stacked_grouped[column.name][max_index]
 
     unique["sky_centroid_dms"] = unique["sky_centroid"].to_string(
