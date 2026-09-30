@@ -508,3 +508,4 @@ def plot_stamps_lc(images_dict, headers_dict, lightcurve_dict,
     file = os.path.join(outdir, f"{id}.{format}")
     fig.savefig(file)
     logger.info(f"Plot saved to file: {file}")
+    plt.close(fig)
